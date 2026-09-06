@@ -1,7 +1,7 @@
 {
   "name": "dsh-search-pro",
   "version": "0.1.0",
-  "description": "深度搜索插件：三层检索（表层多引擎/深网挖掘/Tor代理）+ 18 工具六组",
+  "description": "深度搜索插件：三层检索（表层多引擎/深网挖掘/Tor代理）+ 23 工具（搜索/抓取/OSINT/归档/分享检索）",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
