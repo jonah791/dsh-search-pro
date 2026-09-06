@@ -1,8 +1,11 @@
-/** dsh-search-pro：三层深度搜索插件（表层多引擎 / 深网挖掘 / Tor 代理）· 18 工具六组 */
+/** dsh-search-pro：三层深度搜索插件（表层多引擎 / 深网挖掘 / Tor 代理）· 23 工具 */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { buildQueries } from './buildQuery.js'
 import { searchWeb, searchTavily, searchSerper } from './engines.js'
 import {
@@ -85,6 +88,14 @@ function renderShare(_a: any, v: any): any[] {
 
 export function apply(ctx: Context, config: Config): void {
   const logger = ctx.logger('search-pro')
+  // tavilyKey 单一来源（2026-09-06 凭据迁移）：config 优先（兼容旧配置）→ .credentials.yaml refs 兜底。
+  if (!config.tavilyKey) {
+    try {
+      const cred = readFileSync(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), '.credentials.yaml'), 'utf8')
+      const m = cred.match(/^\s*TAVILY_API_KEY:\s*(\S+)/m)
+      if (m && m[1]) config.tavilyKey = m[1]
+    } catch { /* 无凭据文件 */ }
+  }
   const store = new SearchStore((config.cacheTtlMinutes ?? 60) * 60_000)
   const reg = (tool: any) => ctx.tools.register(defineTool(tool as any))
 
