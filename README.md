@@ -10,6 +10,12 @@
 -->
 # dsh-search-pro
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-search-pro"><img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 深度搜索插件：三层检索（表层多引擎 / 深网挖掘 / Tor 代理）+ 23 工具九组。零运行时依赖（Node 原生 fetch + WSL curl），免费方案起步。
 
 ## 能力分层
