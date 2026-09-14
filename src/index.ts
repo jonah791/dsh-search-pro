@@ -18,6 +18,10 @@ import { fetchPage, fetchTor, torStatus } from './fetch.js'
 import { searchNetdisk, searchMagnet, type ShareResult } from './share.js'
 import { searchCode, searchDarkweb, checkPasswordLeak } from './osint.js'
 import { fetchRobust } from './robust.js'
+import { fileURLToPath } from 'node:url'
+import {
+  buildStamp, composeSearchEntry, readPackageVersion, searchTrace,
+} from './trace.js'
 import { SearchStore } from './store.js'
 
 export const name = 'dsh-search-pro'
@@ -97,7 +101,42 @@ export function apply(ctx: Context, config: Config): void {
     } catch { /* 无凭据文件 */ }
   }
   const store = new SearchStore((config.cacheTtlMinutes ?? 60) * 60_000)
-  const reg = (tool: any) => ctx.tools.register(defineTool(tool as any))
+  // ── 自证轨迹（可维护性 S4 · 2026-09-14 批次 S4-A）────────────────────────────
+  // 单点收口：`reg` 是 **23 个工具的唯一注册入口**，故一个包装器覆盖整个工具面
+  // （不在 N 处手改——漏一处就是新的观测盲区）。观测层零业务影响：
+  // 返回值原样透出（output.schema 是 additionalProperties:false，绝不混入新字段）、
+  // 业务异常原样重抛；落盘失败只吞不抛。
+  const OWN_FILE = fileURLToPath(import.meta.url)
+  /** 进程级构建自报 `<version>@<模块 mtime ms>`（Q1：线上跑的是哪个构建）。 */
+  const BUILD = buildStamp(OWN_FILE, readPackageVersion(OWN_FILE))
+
+  const tracedExecute = (tool: any) => {
+    const inner = typeof tool?.execute === 'function' ? tool.execute.bind(tool) : null
+    const op = String(tool?.name ?? 'unknown')
+    return async (...callArgs: any[]) => {
+      const startedAtMs = Date.now()
+      let result: any
+      let thrown: any = null
+      try {
+        result = inner ? await inner(...callArgs) : undefined
+      } catch (err) {
+        thrown = err
+      }
+      searchTrace(composeSearchEntry({
+        now: startedAtMs, phase: 'call', build: BUILD, op, args: callArgs[0],
+        durationMs: Date.now() - startedAtMs, result, thrown,
+      }))
+      if (thrown !== null) throw thrown
+      return result
+    }
+  }
+
+  const reg = (tool: any) => ctx.tools.register(defineTool({ ...tool, execute: tracedExecute(tool) } as any))
+
+  // boot 行：字段与调用行完全同形（tail 后可直接读列）。
+  searchTrace(composeSearchEntry({
+    now: Date.now(), phase: 'boot', build: BUILD, op: 'apply', args: {}, durationMs: 0, result: { ok: true },
+  }))
 
   const safe = async <T>(fn: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: string }> => {
     try {
