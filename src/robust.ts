@@ -7,6 +7,7 @@
  */
 
 import { execFile } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { httpGet, stripTags, htmlToText, UA } from './util.js'
 
 export type ChallengeType = 'ip-block' | 'js-challenge' | 'rate-limit' | 'waf' | 'none' | 'unknown'
@@ -170,8 +171,10 @@ async function fetchHeadless(url: string): Promise<{ text: string; status: numbe
       { windowsHide: true, timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
         // 清理临时 profile
+        // 注意：本包是 ESM（package.json type=module），**不得**用 require()——ESM 下
+        // require 未定义，会被这层 catch 吞掉，导致每次 headless 调用泄漏一个
+        // %TEMP%\dsh-robust-<ts> 目录（实测 15 个 / ~180MB）。用顶部静态 import 的 rmSync。
         try {
-          const { rmSync } = require('node:fs') as typeof import('node:fs')
           rmSync(userData, { recursive: true, force: true })
         } catch { /* 忽略 */ }
         if (err && !stdout) return reject(new Error(`headless 失败: ${stderr || err.message}`))

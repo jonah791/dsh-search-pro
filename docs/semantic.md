@@ -114,6 +114,8 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A7 | 反爬轨迹可读 | `fetch_robust` 结果 note 含 `通道: <channel> · 反爬诊断: <type>` 且 `尝试: fingerprint=… → prewarm=…` | 待验收 |
 | A8 | Tor 不可达时显式报错且不挂起 | `fetch_tor` 返回含 `Tor 网络不可达（`；`search_quota` 显示 `Tor ❌` | 待验收 |
 | A9 | 线上跑的是当前构建 | `(Get-Item lib/index.js).LastWriteTime = 2026-09-06T18:14:31` 晚于 `src/index.ts`（18:14:21），早于 web 进程启动（2026-09-14 10:05:47） | 已实测（2026-09-14） |
+| A10 | 产物无裸 `require(`（ESM 契约） | `npm test` → `tests/esm-contract.test.mjs` 断言 `lib/**/*.js` 无裸 `require(` 调用；**已取得尸体**：未重建的旧产物上该测试失败 | 已实测（2026-09-14，20/20 pass） |
+| A11 | 纯函数与失败路径有守卫 | `npm test` → `tests/util.test.mjs` 20 例全过；含非法编码/非法 URL/空值/类型不符等退化输入 | 已实测（2026-09-14） |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 **回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（当前 HEAD `b5c5a20`）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。
@@ -126,6 +128,15 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 
 ## 9 · 实践修订记录
 
+- **2026-09-14 · ESM 契约缺陷（headless 临时 profile 泄漏 ~180MB，已修 + 加机器守卫）**
+  - **症状**：headless 通道每次调用泄漏一个 `%TEMP%\dsh-robust-<ts>` 目录（实测 **15 个**，每个约 **12MB**），日志毫无异常。
+  - **根因**：本包 `type=module` + tsconfig `module:NodeNext` ⇒ 产物是纯 ESM，但 `src/robust.ts` 的清理写了 `require('node:fs')`——ESM 下 `require` 未定义 → 抛错被 `catch { /* 忽略 */ }` **静默吞掉**。**「清理失败的静默」伪装成了「已清理」。**
+  - **修复**：改顶部静态 `import { rmSync } from 'node:fs'`；§10 的 U1 由此闭环。
+  - **语义被补充（新不变量）**：**产物不得出现裸 `require(` 调用**——本包是 ESM，任何历史 CJS 写法都会在运行期抛错并被自身 try/catch 吞掉。由 `tests/esm-contract.test.mjs` 机器守卫；**尸体测试**：未重建的旧产物上该测试确实失败（已实测），重建后通过。
+  - **语义被补充（测试面）**：`tests/util.test.mjs` 20 例覆盖 `stripTags`/`htmlToText`/`decodeDdgUrl`/`decodeBingUrl`/`normalizeUrl`/`dedupe`/`str`/`num` 的正常路径 + **失败/退化路径**（非法百分号编码、非法 URL、空值、类型不符）。
+  - **教训一（写测试的纪律）**：首版把 `decodeDdgUrl` 的失败路径断言成「原串原样返回」——实测是「非法编码 → `decodeURIComponent` 抛错 → 落入协议补全分支 → `//` 补成 `https://`」。**测试必须编码意图行为，不是猜测行为**；断言失败先判「代码错还是预期错」。
+  - **教训二（回写技能 `plugin-maintainability`）**：`catch { /* 忽略 */ }` 是缺陷温床——**静默兜底必须配一条「它真的兜住了吗」的观测**，否则失败被伪装成成功。
+
 - **2026-09-14 补课：本插件此前无语义文档（可维护性工程）**
   - 语义**被确认**：23 工具、`inject=['tools']`、`SearchStore` 全内存态、输出外壳 `{ok,count,results}`。
   - 语义**被补充**：7 条有缓存的键清单、`.credentials.yaml` 兜底路径与匹配式、WSL/Tor/Chrome 三个运行期外部依赖、`archiveTodayLookup` 为未接入死代码。
@@ -134,7 +145,6 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 
 ## 10 · 未决问题
 
-- **U1 headless 临时 profile 泄漏**：`src/robust.ts:fetchHeadless` 用 `require('node:fs')`（ESM 下 `require` 未定义 → `ReferenceError` 被 `try/catch` 吞掉）→ `%TEMP%\dsh-robust-*` 目录**只增不减**（lib 产物同样如此）。倾向：改 `import { rmSync } from 'node:fs'` 顶层导入——**需主人裁定是否动代码**。
 - **U2 缓存淘汰只清过期项**：`set()` 在 `size > 500` 时仅删 `expiresAt` 已过的键；高活跃会话可超 500 条常驻。
 - **U3 `SearchStore` 作用域**：实例在 `apply()` 内创建——单 web 进程内多会话是否共享同一实例（→ 缓存/配额是否跨会话串味）待实测确认；确认后回写本节。
 - **U4 `search_leaks` 与「凭据不落盘」纪律的张力**：明文密码作为工具参数必然进入会话事件流（模型可见 ⟺ 已记录）。倾向：文档明示「只查一次性的自查口令，禁止查主人真实在用的口令」。
