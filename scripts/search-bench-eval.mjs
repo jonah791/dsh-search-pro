@@ -15,7 +15,7 @@ const CASES = [
   { q: 'searxng enable json api search', expect: 'docs.searxng.org', why: '官方文档站' },
   { q: 'parallel search api free tier for agents', expect: 'parallel.ai', why: '供应商官网' },
   { q: 'cloudflare workers x402 payment middleware', expect: 'cloudflare.com', why: '平台官方文档' },
-  { q: 'readthedocs custom build commands prebuilt html output', expect: 'docs.readthedocs.io', why: '官方文档' },
+  { q: 'readthedocs custom build commands prebuilt html output', expect: 'readthedocs', why: '官方文档（⚠ 标签原写 docs.readthedocs.io，实测真域名是 docs.readthedocs.**com** —— 标签写错会把真命中记成 MISS，2026-09-18 修正）' },
   { q: 'github actions workflow dispatch permissions matrix', expect: 'docs.github.com', why: '官方文档' },
   { q: 'postgres jsonb gin index performance', expect: 'postgresql.org', why: '官方文档' },
   { q: 'react server components suspense streaming', expect: 'react.dev', why: '官方文档' },

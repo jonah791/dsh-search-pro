@@ -98,42 +98,46 @@ export async function deepResearch(a: DeepArgs): Promise<DeepResult> {
   const maxSources = Math.max(1, Math.min(10, a.maxSources ?? 5))
   const perDomain = Math.max(1, a.perDomain ?? 2)
   const stats = { engineCalls: 0, queries: queries.length, sources: 0, fetched: 0, callsPerAnswer: 0, rounds: 1, gapFilled: 0 }
+  /** 通道贡献计数：0 = 该通道这一轮没有贡献结果（**静默降级唯一可见的地方**，2026-09-18 事故驱动） */
+  const channel: Record<string, number> = {}
 
-  const jobs: Promise<SearchResult[]>[] = []
+  const jobs: { engine: string; p: Promise<SearchResult[]> }[] = []
   // ① Parallel：一次调用吃下整组扇出（它的形状天生支持多查询）——最省调用
   if (engines.includes('parallel')) {
     stats.engineCalls++
-    jobs.push(
-      searchParallel(primary, 12, {
+    jobs.push({
+      engine: 'parallel',
+      p: searchParallel(primary, 12, {
         objective: a.objective ?? primary,
         sessionId: a.sessionId,
         extraQueries: queries.slice(1),
       }).catch(() => []),
-    )
+    })
   }
   // ② 自托管 SearXNG：对主查询 + 前两条变体各查一次（本机、零成本）
   if (engines.includes('searxng')) {
     for (const q of queries.slice(0, 3)) {
       stats.engineCalls++
-      jobs.push(searchSearxng(q, a.searxngBase, 10).catch(() => []))
+      jobs.push({ engine: 'searxng', p: searchSearxng(q, a.searxngBase, 10).catch(() => []) })
     }
   }
   // ③ 其余免费引擎：只查主查询（保底，不放大调用数）
   const others = engines.filter((e) => e !== 'parallel' && e !== 'searxng')
   if (others.length) {
     stats.engineCalls++
-    jobs.push(
-      searchWeb({
+    jobs.push({
+      engine: others.join('+'),
+      p: searchWeb({
         query: primary,
         engines: others,
         tavilyKey: a.tavilyKey,
         serperKey: a.serperKey,
         searxngBase: a.searxngBase,
       }).catch(() => []),
-    )
+    })
   }
 
-  const settled = await Promise.all(jobs)
+  const settled = await Promise.all(jobs.map((j) => j.p))
   const byUrl = new Map<string, SearchResult & { engines: string[] }>()
   const mergeInto = (list: SearchResult[]) => {
     for (const r of list) {
@@ -148,7 +152,13 @@ export async function deepResearch(a: DeepArgs): Promise<DeepResult> {
       }
     }
   }
-  for (const list of settled) mergeInto(list)
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i]
+    if (!job) continue
+    const list = settled[i] ?? []
+    channel[job.engine] = (channel[job.engine] ?? 0) + list.length
+    mergeInto(list)
+  }
 
   // 相关性 rerank（2026 调研结论之一）：引擎票数之外，再看查询词是否真落在标题/摘录里
   const terms = primary
@@ -189,24 +199,28 @@ export async function deepResearch(a: DeepArgs): Promise<DeepResult> {
       .filter((q) => q.length > 3)
     if (gapQueries.length) {
       stats.rounds = 2
-      const more: SearchResult[][] = []
+      const more: { engine: string; list: SearchResult[] }[] = []
       if (engines.includes('parallel')) {
         stats.engineCalls++
-        more.push(
-          await searchParallel(primary, 12, {
+        more.push({
+          engine: 'parallel',
+          list: await searchParallel(primary, 12, {
             objective: a.objective ?? primary,
             sessionId: a.sessionId,
             extraQueries: gapQueries,
           }).catch(() => []),
-        )
+        })
       }
       if (engines.includes('searxng')) {
         for (const q of gapQueries.slice(0, 2)) {
           stats.engineCalls++
-          more.push(await searchSearxng(q, a.searxngBase, 10).catch(() => []))
+          more.push({ engine: 'searxng', list: await searchSearxng(q, a.searxngBase, 10).catch(() => []) })
         }
       }
-      for (const list of more) mergeInto(list)
+      for (const m of more) {
+        channel[m.engine] = (channel[m.engine] ?? 0) + m.list.length
+        mergeInto(m.list)
+      }
       const before = picked.length
       picked = pick(maxSources)
       stats.gapFilled = picked.length - before
@@ -243,6 +257,11 @@ export async function deepResearch(a: DeepArgs): Promise<DeepResult> {
   lines.push(`## 深研：${primary}`)
   lines.push(`扇出查询（${queries.length}）：${queries.map((q) => '`' + q + '`').join(' · ')}`)
   lines.push(`引擎调用 ${stats.engineCalls} 次 → 唯一来源 ${sources.length} 条（抓正文 ${stats.fetched} 条）`)
+  lines.push(
+    `通道贡献：${Object.entries(channel)
+      .map(([k, v]) => `${k}=${v}${v === 0 ? '（⚠ 本轮未响应/空手）' : ''}`)
+      .join(' · ')}`,
+  )
   lines.push('')
   if (!sources.length) {
     lines.push('_无结果：所有引擎都空手而归。先查引擎是否可用（search_quota / searxng 实例），再判定「真的没有」。_')

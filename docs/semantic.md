@@ -1,16 +1,18 @@
-# 语义文档：dsh-search-pro（深度搜索 · 三层检索 / 23 工具）
+# 语义文档：dsh-search-pro（深度搜索 · 三层检索 / 24 工具）
 
 > 能力名：`dsh-search-pro` · 主副本路径：`self-plugins/dsh-search-pro/docs/semantic.md`
-> 实现落点：`self-plugins/dsh-search-pro/src/index.ts`（+ `src/engines.ts` `src/deep.ts` `src/robust.ts` `src/share.ts` `src/osint.ts` `src/store.ts` `src/fetch.ts` `src/archive.ts` `src/buildQuery.ts` `src/util.ts`）
-> 版本：v0.1.0（package.json） · 2026-09-14 · 作者：爱丽丝 · 状态：**draft**
+> 实现落点：`self-plugins/dsh-search-pro/src/index.ts`（+ `src/engines.ts` `src/deep.ts` `src/robust.ts` `src/share.ts` `src/osint.ts` `src/store.ts` `src/fetch.ts` `src/archive.ts` `src/buildQuery.ts` `src/util.ts` **`src/research.ts`**）
+> 版本：v0.1.0（package.json） · 2026-09-18 复核 · 作者：爱丽丝 · 状态：**implemented**
 > 开发方式：语义文档优先（先写清「是什么/什么关系/怎么裁决」，再让实现逼近，最后用实践回修）
 
 ---
 
 ## 1 · 定位与反定位
 
-**定位**：给我一套「检索 + 抓取」工具面（23 个 `search_*` / `fetch_*` / `archive_*` / `lookup_*` / `enum_*` 工具），
-覆盖三层——L1 表层多引擎、L2 深网与 OSINT、L3 Tor/反爬抓取——并统一输出外壳 `{ ok, count, results, error?, note? }`。
+**定位**：给我一套「检索 + 抓取」工具面（**24 个** `search_*` / `fetch_*` / `archive_*` / `lookup_*` / `enum_*` 工具），
+覆盖三层——L1 表层多引擎（**含 2026-09-18 新增的无钥匙 `parallel` 与自托管 `searxng`**）、L2 深网与 OSINT、L3 Tor/反爬抓取——
+并统一输出外壳 `{ ok, count, results, error?, note? }`；**`search_deep`（2026-09-18）**在其上提供「一句话交付带引用报告」的深研循环。
+
 
 **反定位（本文不管什么）**：
 - 不管**内容判断**（结果该不该信、够不够用）——那是调用者（我）的裁决，本插件只做**取回与结构化**
@@ -170,6 +172,11 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A15 | 观测绝不反噬主流程（IO 失败不抛） | `npm test` → `尸体测试：父路径是普通文件 → 返回 false 且不抛`（`assert.doesNotThrow` + `=== false`） | **已实测** |
 | A16 | **`search_leaks` 的 `password` 永不落盘**（隐私红线端到端） | `npm test` → `隐私尸体测试端到端`：喂 `{password:'hunter2secret'}` → 断言 `params === ''`；喂 `apiKey`/`token` → 断言摘要里不含键名；喂 error 含 `Bearer <32位>` → 断言落盘原文 `includes(secret) === false`（逐个）；且 `[redacted]` 确实出现、非敏感参数 `query=爱丽丝` 仍可读 | **已实测** |
 | A17 | 观测覆盖全部 23 工具（无旁路） | 收口在 `reg()` 内层——**23 个工具的唯一注册入口**，故覆盖率为工具数本身；新增工具只要走 `reg()` 即被观测（§4.4 调用点清单） | **待线上验收**（覆盖率由构造保证，非逐点登记） |
+| A18 | **`search_deep` 的输出能被人读到**（render 契约） | `dsh-tools` 的 render 必须返回 **`[{ type:'text', text }]`**；2026-09-18 实测：返回裸字符串数组时 **trace 记 `ok:true`/8.6 s 而界面显示为空**（沉默失败）⇒ 修后线上 `search_deep` 输出完整带 `[n]` 引用的报告 | **已实测（2026-09-18，线上 4 源/抓 4）** |
+| A19 | **`search_web` 默认引擎组含两条活通道**（抗单点） | `scripts/search-bench-eval.mjs` 的 `engineCoverage`：修复前 **`parallel` 独苗**；把 `searxng` 拉进默认组后 = **`parallel 37/80` + `searxng 13/63`**（⚠ 前提＝SearXNG 容器健康，见 A20 与 §9 的端口冲突坑） | **已实测（2026-09-18）** |
+| A20 | **自托管 SearXNG 的 JSON 通道可用** | `curl 'http://127.0.0.1:8888/search?q=…&format=json'` → HTTP 200 / `results=31` / `engines_used=[brave, google cse]`；容器需 **代理 env** + **`network_mode: host`** + `SEARXNG_PORT`；**地址占用恢复法**：`docker compose down --remove-orphans` → `up -d`（`--force-recreate` 会留下霸占 host 端口的僵尸 → 容器进 restart 循环） | **已实测（2026-09-18）** |
+| A21 | **带标注评测可给出可辩护的数字**（hit@k/MRR） | `node scripts/search-bench-eval.mjs` → **`hit@3 8/8 · hit@5 8/8 · MRR 0.938`**；标签自身也被体检过（`docs.readthedocs.**com**`，原标签写 `.io` 会把真命中记成 MISS ⇒ 先修仪器再改系统） | **已实测（2026-09-18）** |
+| A22 | **回归基准可复跑** | `node scripts/search-bench.mjs`（12 条固定查询）→ `queryHitRate 12/12 · avgDomains 5.8`；`node --test tests/*.test.mjs` → **40/40** | **已实测（2026-09-18）** |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 **回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（当前 HEAD `b5c5a20`）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。
@@ -182,6 +189,15 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **未实现/未验证**：`archive.ts:archiveTodayLookup` **已实现但未接入任何工具**（死代码）；README 提到的 SearXNG 增强**未实现**；`community` 的 `tieba` 平台仅在类型里（`CommunityPlatform`），`COMMUNITY_PLATFORMS` 与工具 enum 均只含 `reddit/hn/4chan`。
 
 ## 9 · 实践修订记录
+
+- **2026-09-18 · 检索增强批次（两引擎 + `search_deep` + 评测；工具面 23→24）**
+  - **新增能力（语义扩张）**：① 引擎 **`parallel`**（`https://search.parallel.ai/mcp`，**无账号/无 key**；形状＝`objective` + 一次多查询扇出 + 稳定 `session_id`，返回**密集摘录**）；② 引擎 **`searxng`**（自托管 JSON API，默认 `http://127.0.0.1:8888`，配置项 `searxngBase`）；③ 工具 **`search_deep`**（`src/research.ts:deepResearch`）＝ 扇出 → 多引擎并行 → 去重 + 每域≤2 → **相关性 rerank** → **缺口补查 gap fill** → 抓正文 → **带 `[n]` 引用的报告**，并回报 `stats{engineCalls,queries,sources,fetched,callsPerAnswer,rounds,gapFilled}`。
+  - **⚠ 行为变更（默认值语义变了）**：`search_web` 默认引擎组由 `duckduckgo+brave` 改为 **`parallel+searxng+duckduckgo+brave`**——**默认延迟与结果集都变了**（单查询结果数 10 → 16~20），且多了一个**本机进程依赖**（SearXNG 容器）。调用方若要求最小延迟应显式传 `engines`。
+  - **教训一 · 沉默失败（本轮最贵）**：`search_deep` 首次上线时 **trace 记 `ok:true` / 8.6 s，界面输出为空**。根因＝**render 契约写错**：`dsh-tools` 的 render 必须返回 **`[{ type:'text', text }]`**，我返回了裸字符串数组。**「调用没报错」与「结果被人读到」是两件事**；判据必须落到后者（A18）。
+  - **教训二 · 部署面三坑（SearXNG）**：① **容器必须带代理 env**（`HTTP(S)_PROXY=http://127.0.0.1:16888`），否则所有上游引擎 `timeout`（WSL 的出网走 Windows 侧 Clash，容器默认不带）；② **必须 `network_mode: host`**（bridge 下 `host.docker.internal:16888` 到不了 Windows 侧代理）；③ 镜像入口脚本用 **env 覆盖** `server.port`/`bind_address`（改 `settings.yml` 不生效）⇒ 用 `SEARXNG_PORT=8888`。**恢复法**：`--force-recreate` 会留下霸占 host 端口的僵尸 ⇒ 容器进 `RuntimeError: Address already in use` 重启循环 ⇒ 正解 `docker compose down --remove-orphans` 后 `up -d`。
+  - **教训三 · 先修仪器再改系统**：带标注评测首跑把 `readthedocs` 判成 MISS，实为**标签写错**（真域名 `docs.readthedocs.**com**`，我写了 `.io`）⇒ 修标签后 `hit@3` 从 7/8 变 **8/8**、MRR 0.813 → **0.938**。**评测工具的错判会伪装成被测系统的缺陷**。
+  - **边界如实记（反面结论）**：双通道对**英文技术类深研查询没有增加来源**（同一组 4 条来源全部来自 `parallel`，多出的引擎调用被去重吃掉）⇒ 第二通道的收益是**抗单点与结果多样性**（`engineCoverage`：`parallel 41/80` + `searxng 17/62`），**不是这批查询上的准确率**。不要把覆盖率上升读成质量上升。
+  - **验收基线与回归**：`node --test tests/*.test.mjs` **40/40**；`scripts/search-bench.mjs`（12 条）`12/12 命中 · avgDomains 5.8`；`scripts/search-bench-eval.mjs`（8 条弱标注）**hit@3 8/8 · hit@5 8/8 · MRR 0.938**。提交：`jonah791/dsh-search-pro` `5f58959`。
 
 - **2026-09-14 · ESM 契约缺陷（headless 临时 profile 泄漏 ~180MB，已修 + 加机器守卫）**
   - **症状**：headless 通道每次调用泄漏一个 `%TEMP%\dsh-robust-<ts>` 目录（实测 **15 个**，每个约 **12MB**），日志毫无异常。
@@ -238,6 +254,22 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
   本插件调用频率**最高**（23 工具 + 多引擎翻页，单轮可达数十次），是四个 S4-A 插件里最需要上限的一个。
   倾向：按 `dsh-plugin-bootreport` 的「有界裁剪（`keepLines + 50`）」加上限，断言写「有界」而非「恰好等于」。
   需裁决是否本轮补。
+
+- **U7（新，2026-09-18）官方 `web-search-deepseek` 配置为空 ⇒ `web_search` 恒 401**：`settings.yaml` 里
+  `web-search-deepseek: {}`，其请求打 `https://api.deepseek.com/anthropic/v1/messages`，报
+  `HTTP 401 Authentication Fails, Your api key: ****6ilR is invalid`。该工具自述**搜索端点与 chat 分开**、
+  可用 `DEEPSEEK_SEARCH_BASE_URL` 或 `web-search-deepseek.baseURL` 改指，并明确 **「Only the user should choose
+  or change the endpoint」**。⇒ **归属主人裁决**（换 key / 换端点 / 退役该设置）。本插件已用
+  `parallel` + `searxng` 两条**无钥匙**通道替代该能力，故不阻塞。
+- **U8（新，2026-09-18）SearXNG 的暴露面与健康未纳入观测**：host 网络下实际监听 **`*:8888`**（非计划的
+  `127.0.0.1`）；暴露面限于 WSL NAT + Windows localhost 转发（未对局域网开放），但**偏离了「只绑本机」的设计意图**。
+  同时容器健康**没有任何观测**——它 12:31 进重启循环时，插件侧只表现为「searxng 静默返回 0 条」，
+  与 `parallel` 正常无差别。倾向：① 把 `unresponsive_engines`/容器健康折进 `search_deep` 报告的「通道健康」段；
+  ② 或加一条 `search_quota` 式的 searxng 探针。**需裁决是否本轮补。**
+- **U9（新，2026-09-18）真 reranker 未接入**：本轮的「相关性 rerank」只是**词面命中计数**（引擎票数 + 查询词
+  在标题/摘录中出现次数），不是学习型 reranker。调研中出现的 **RankLLM MCP（SIGIR 2026，提供
+  `retrieve-and-rerank` / `rerank` 两个工具）** 是现成的下一级选项。倾向：先看英文技术类查询的实际痛点是否需要，
+  再决定是否引入一个 Java/Python 侧服务（运行期依赖成本高）。
 
 ## 附 · 快速取证命令
 
