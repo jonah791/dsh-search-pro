@@ -12,11 +12,14 @@ const execFileAsync = promisify(execFile)
  *  而同一条 URL 在 WSL 内是 200 ⇒ 直连失败时必须落回 WSL 通道（2026-09-18 实测）。 */
 async function wslCurl(url: string, timeoutSec = 20): Promise<string> {
   const safe = url.replace(/'/g, '%27')
-  const { stdout } = await execFileAsync(
-    'wsl.exe',
-    ['-d', 'Ubuntu', '--', 'bash', '-lc', `curl -s -m ${timeoutSec} '${safe}'`],
-    { timeout: (timeoutSec + 6) * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
-  )
+  // ⚠ 必须剥掉继承来的代理环境（宿主 Windows 的 HTTP(S)_PROXY 会传进 wsl.exe 的 bash 会话），
+  //   否则对本机 127.0.0.1:8888 的请求会被送去 Clash ⇒ **HTTP 502**（实测 2026-09-18）。
+  const cmd = `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy curl -s --noproxy '*' -m ${timeoutSec} '${safe}'`
+  const { stdout } = await execFileAsync('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', '-lc', cmd], {
+    timeout: (timeoutSec + 6) * 1000,
+    maxBuffer: 8 * 1024 * 1024,
+    windowsHide: true,
+  })
   return stdout
 }
 
