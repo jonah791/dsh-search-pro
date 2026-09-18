@@ -1,6 +1,24 @@
 /** L1 表层检索：DuckDuckGo / Bing / Tavily / Serper 多引擎 */
 
 import { httpGet, httpPostJSON, decodeDdgUrl, decodeBingUrl, stripTags, normalizeUrl, dedupe, UA } from './util.js'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+
+/** 从 WSL 内部 curl（复用 `fetch_tor` 的通道纪律）。
+ *  为什么需要：宿主是 Windows，而自托管 SearXNG 跑在 WSL 的 host 网络里——
+ *  实测 Windows 侧 `http://127.0.0.1:8888` 直接 **连接失败（curl 000）**，
+ *  而同一条 URL 在 WSL 内是 200 ⇒ 直连失败时必须落回 WSL 通道（2026-09-18 实测）。 */
+async function wslCurl(url: string, timeoutSec = 20): Promise<string> {
+  const safe = url.replace(/'/g, '%27')
+  const { stdout } = await execFileAsync(
+    'wsl.exe',
+    ['-d', 'Ubuntu', '--', 'bash', '-lc', `curl -s -m ${timeoutSec} '${safe}'`],
+    { timeout: (timeoutSec + 6) * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+  )
+  return stdout
+}
 
 export interface SearchResult {
   title: string
@@ -221,8 +239,26 @@ export async function searchSearxng(
   const qs = new URLSearchParams({ q: query, format: 'json', safesearch: '0' })
   if (opts.categories) qs.set('categories', opts.categories)
   if (opts.language) qs.set('language', opts.language)
-  const raw = await httpGet(`${root}/search?${qs.toString()}`, { timeoutMs: 20000 })
-  const data = JSON.parse(raw)
+  const url = `${root}/search?${qs.toString()}`
+  let raw = ''
+  try {
+    raw = await httpGet(url, { timeoutMs: 20000 })
+  } catch {
+    // Windows→WSL 直连失败（实测 curl 000）⇒ 试 WSL 内 curl。
+    // ⚠ 2026-09-18 实测：宿主侧 `wsl.exe … bash -lc "curl …"` 返回**空**
+    //   （wsl.exe 会重解析 argv，安全传参需要 base64 通道）⇒ 本 fallback 目前不可靠，见语义文档 U10。
+    try {
+      raw = await wslCurl(url)
+    } catch {
+      return []
+    }
+  }
+  let data: any
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    return [] // 空体 / HTML / 端口占用一律按「本通道无结果」→ 由上层「通道贡献」行如实报 0
+  }
   const results = Array.isArray(data?.results) ? data.results : []
   return results
     .slice(0, maxResults)
