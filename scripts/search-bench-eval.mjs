@@ -20,6 +20,16 @@ const CASES = [
   { q: 'postgres jsonb gin index performance', expect: 'postgresql.org', why: '官方文档' },
   { q: 'react server components suspense streaming', expect: 'react.dev', why: '官方文档' },
   { q: 'tavily search api pricing free tier limits', expect: 'tavily.com', why: '供应商官网' },
+  // ── 2026-09-18 第二轮扩样（8 → 16）：覆盖「平台 / 数据库 / 容器 / 安全 / 语言 / 工具链 / 运维 / 可观测」八族，
+  //    避免只在「搜索供应商」那一族上自证（自证偏差 = 评测只能证明它擅长的那类查询）。
+  { q: 'microsoft wsl localhost forwarding mirrored networking mode', expect: 'learn.microsoft.com', why: '官方文档（U10 事故相关 · 平台）' },
+  { q: 'sqlite wal mode checkpoint starvation long running reader', expect: 'sqlite.org', why: '官方文档（数据库运行时）' },
+  { q: 'docker compose restart policy unless-stopped behavior', expect: 'docs.docker.com', why: '官方文档（容器运行时）' },
+  { q: 'argon2 vs bcrypt password hashing recommendation', expect: 'owasp.org', why: '权威指南（安全）' },
+  { q: 'typescript satisfies operator type narrowing', expect: 'typescriptlang.org', why: '官方文档（语言）' },
+  { q: 'git rerere reuse recorded resolution explained', expect: 'git-scm.com', why: '官方文档（工具链）' },
+  { q: 'kubernetes pod disruption budget best practices', expect: 'kubernetes.io', why: '官方文档（运维）' },
+  { q: 'prometheus histogram quantile aggregation pitfall', expect: 'prometheus.io', why: '官方文档（可观测性）' },
 ]
 
 const dom = (u) => {
