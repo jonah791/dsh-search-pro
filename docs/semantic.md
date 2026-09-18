@@ -276,6 +276,9 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
     ③ 已加 fallback（直连失败 → WSL 内 curl），但宿主侧 `wsl.exe -d Ubuntu -- bash -lc "curl …"` **返回空**（`wsl.exe` 会重解析 argv；harness 自己的 `wsl` 工具正是为此走 **base64 通道**）⇒ **fallback 尚不可靠**，故本条未闭环。
   - **影响范围（别混读）**：`search-bench-eval` 在 **WSL 内**跑出的 `engineCoverage parallel 41/80 + searxng 17/62` 对**引擎本身**成立；**工具路径**上的真实覆盖仍是 **parallel 单通道**。
   - **三条候选修法**（需裁决）：① fallback 改 **base64 通道**调 `wsl.exe`（与 harness 同款，改动最小）；② 容器改 **bridge + `127.0.0.1:8888:8080`**（Windows 直连可用），代价是容器需另寻到桌面 Clash 的出网路径；③ 把 SearXNG 暴露到 Windows 可达地址（WSL IP / `netsh portproxy`），代价是 IP 易变或需管理员权限。
+  - **12:49 更新（负结果矩阵·别重试）**：同一 URL 在 Windows 侧 Node 里实测——**裸 `wsl.exe` + 剥代理 env + `curl --noproxy '*'` 曾成功（10 条/867 ms），但随后同一条代码复跑变 0 条/6.9 s**；绝对路径 `C:\WINDOWS\System32\wsl.exe` → 0 条；写文件 + `\\wsl.localhost\Ubuntu` 读回（绕开管道 stdio）→ 0 条。
+    ⇒ 结论收敛为：**Windows→WSL 的 8888 可达性是间歇的**（曾经 867 ms 走通直连，属 localhost 转发窗口），而 **WSL curl fallback 不可靠**。
+    **下一步（下轮第一件事）**：把容器改成 **bridge + `127.0.0.1:8888:8080`**（彻底不需要 wsl.exe 参与），并给容器单独解决出网；同时给 `search_deep` 的 trace 补 **per-channel 错误字段**，让下一次失败自解释。
 
 ## 附 · 快速取证命令
 
