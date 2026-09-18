@@ -270,6 +270,12 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
   在标题/摘录中出现次数），不是学习型 reranker。调研中出现的 **RankLLM MCP（SIGIR 2026，提供
   `retrieve-and-rerank` / `rerank` 两个工具）** 是现成的下一级选项。倾向：先看英文技术类查询的实际痛点是否需要，
   再决定是否引入一个 Java/Python 侧服务（运行期依赖成本高）。
+- **U10（新，2026-09-18 · 未闭环）宿主是 Windows、SearXNG 在 WSL：直连通道不通 ⇒ `searxng` 在工具路径上等于没接**
+  - **实测**：① Windows 侧 `curl http://127.0.0.1:8888/…` → **`000`（连接失败）**；同一条 URL 在 WSL 内 → **200（31~38 条）**。
+    ② 于是**插件路径**（web 进程在 Windows）上 `searxng` 每轮贡献 0 条——由 `search_deep` 的「通道贡献」行暴露（`parallel=10 · searxng=0（⚠）`）。
+    ③ 已加 fallback（直连失败 → WSL 内 curl），但宿主侧 `wsl.exe -d Ubuntu -- bash -lc "curl …"` **返回空**（`wsl.exe` 会重解析 argv；harness 自己的 `wsl` 工具正是为此走 **base64 通道**）⇒ **fallback 尚不可靠**，故本条未闭环。
+  - **影响范围（别混读）**：`search-bench-eval` 在 **WSL 内**跑出的 `engineCoverage parallel 41/80 + searxng 17/62` 对**引擎本身**成立；**工具路径**上的真实覆盖仍是 **parallel 单通道**。
+  - **三条候选修法**（需裁决）：① fallback 改 **base64 通道**调 `wsl.exe`（与 harness 同款，改动最小）；② 容器改 **bridge + `127.0.0.1:8888:8080`**（Windows 直连可用），代价是容器需另寻到桌面 Clash 的出网路径；③ 把 SearXNG 暴露到 Windows 可达地址（WSL IP / `netsh portproxy`），代价是 IP 易变或需管理员权限。
 
 ## 附 · 快速取证命令
 
