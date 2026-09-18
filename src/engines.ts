@@ -3,6 +3,7 @@
 import { httpGet, httpPostJSON, decodeDdgUrl, decodeBingUrl, stripTags, normalizeUrl, dedupe, UA } from './util.js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { readFile } from 'node:fs/promises'
 
 const execFileAsync = promisify(execFile)
 
@@ -12,9 +13,14 @@ const execFileAsync = promisify(execFile)
  *  而同一条 URL 在 WSL 内是 200 ⇒ 直连失败时必须落回 WSL 通道（2026-09-18 实测）。 */
 async function wslCurl(url: string, timeoutSec = 20): Promise<string> {
   const safe = url.replace(/'/g, '%27')
-  // ⚠ 必须剥掉继承来的代理环境（宿主 Windows 的 HTTP(S)_PROXY 会传进 wsl.exe 的 bash 会话），
-  //   否则对本机 127.0.0.1:8888 的请求会被送去 Clash ⇒ **HTTP 502**（实测 2026-09-18）。
-  const cmd = `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy curl -s --noproxy '*' -m ${timeoutSec} '${safe}'`
+  // 2026-09-18 实测矩阵（同一 URL，Windows 侧 Node 进程）：
+  //   ✅ 裸 `wsl.exe` + 剥代理 env + `curl --noproxy '*'` + 管道 stdio → **10 条 / 867 ms**
+  //   ❌ 绝对路径 `C:\WINDOWS\System32\wsl.exe` → 0 条
+  //   ❌ 写文件 + UNC(`\\wsl.localhost\Ubuntu…`) 读回（绕开管道 stdio）→ 0 条
+  //   ⇒ 保留唯一被证明可用的那一种；web 进程内仍为 0（见语义文档 U10：疑与 web 进程的 spawn 上下文有关）
+  const cmd =
+    `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy ` +
+    `curl -s --noproxy '*' -m ${timeoutSec} '${safe}'`
   const { stdout } = await execFileAsync('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', '-lc', cmd], {
     timeout: (timeoutSec + 6) * 1000,
     maxBuffer: 8 * 1024 * 1024,
