@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { buildQueries } from './buildQuery.js'
 import { searchWeb, searchTavily, searchSerper } from './engines.js'
+import { deepResearch } from './research.js'
 import {
   searchAcademic, searchPatent, searchGithub, searchCommunity,
   lookupWhois, enumSubdomains, lookupDnsHistory, searchShodan,
@@ -36,6 +37,8 @@ export interface Config {
   githubToken: string
   jinaKey: string
   defaultLang: string
+  /** SearXNG 自托管实例根地址（JSON API，无 key；只绑本机）——默认 http://127.0.0.1:8888 */
+  searxngBase?: string
   cacheTtlMinutes?: number
 }
 
@@ -48,6 +51,7 @@ export const Config = z.object({
   githubToken: z.string().default(''),
   jinaKey: z.string().default(''),
   defaultLang: z.string().default('zh'),
+  searxngBase: z.string().default('http://127.0.0.1:8888'),
   cacheTtlMinutes: z.number().default(60),
 })
 
@@ -174,22 +178,26 @@ export function apply(ctx: Context, config: Config): void {
   /* ── B · 表层检索组 ── */
   reg({
     name: 'search_web',
-    description: '通用多引擎搜索（DuckDuckGo/Brave/Bing 免费 + 可选 Tavily/Serper API），聚合去重。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
+    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Brave / Bing 免费 + 可选 Tavily/Serper API），聚合去重。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
     parameters: {
       query: { type: 'string', required: true, description: '搜索词' },
-      engines: { type: 'array', items: { type: 'string', enum: ['duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 duckduckgo+brave）' },
+      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 parallel+duckduckgo+brave）' },
       lang: { type: 'string', description: '语言提示' },
       pages: { type: 'number', description: '翻页深度 1-3（默认 1）' },
+      objective: { type: 'string', description: 'Parallel：自然语言说明「要找什么」（缺省＝query）' },
+      sessionId: { type: 'string', description: 'Parallel：稳定会话 id（免费档按它限速；同会话复用同一值）' },
+      extraQueries: { type: 'array', items: { type: 'string' }, description: 'Parallel：与主查询一次性扇出的补充查询（≤3 条，比链式重搜便宜）' },
       timeRange: { type: 'string', description: '时间过滤（只对 duckduckgo 生效）：w=一周内 m=一月内 y=一年内，或 YYYY-MM-DD..YYYY-MM-DD 绝对区间。找新资源用' },
     },
     output: { schema: resultsSchema(), render: renderList },
     async execute(args: any) {
-      const ck = `web:${args.query}:${(args.engines ?? []).join(',')}:${args.pages ?? 1}:${args.timeRange ?? ''}`
+      const ck = `web:${args.query}:${(args.engines ?? []).join(',')}:${args.pages ?? 1}:${args.timeRange ?? ''}:${args.sessionId ?? ''}`
       const hit = store.get(ck)
       if (hit) return hit
       const r = await safe(() => searchWeb({
         query: args.query, engines: args.engines, lang: args.lang ?? config.defaultLang,
         pages: args.pages, tavilyKey: config.tavilyKey, serperKey: config.serperKey, timeRange: args.timeRange,
+        searxngBase: config.searxngBase, objective: args.objective, sessionId: args.sessionId, extraQueries: args.extraQueries,
       }))
       if (!r.ok) return { ok: false, error: r.error }
       store.bump('search_web')
@@ -221,6 +229,74 @@ export function apply(ctx: Context, config: Config): void {
       if (!r.ok) return { ok: false, error: r.error }
       store.bump('serper')
       return { ok: true, count: r.value.length, results: r.value }
+    },
+  })
+
+  /* ── B2 · 深研循环（L3）── */
+  const deepSchema: any = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      ok: { type: 'boolean', required: true },
+      query: { type: 'string' },
+      queries: { type: 'array', items: { type: 'string' } },
+      report: { type: 'string' },
+      sources: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            n: { type: 'number' }, title: { type: 'string' }, url: { type: 'string' },
+            domain: { type: 'string' }, engines: { type: 'array', items: { type: 'string' } },
+            excerpt: { type: 'string' }, content: { type: 'string' },
+          },
+        },
+      },
+      stats: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          engineCalls: { type: 'number' }, queries: { type: 'number' }, sources: { type: 'number' },
+          fetched: { type: 'number' }, callsPerAnswer: { type: 'number' },
+          rounds: { type: 'number' }, gapFilled: { type: 'number' },
+        },
+      },
+      error: { type: 'string' },
+    },
+  }
+
+  reg({
+    name: 'search_deep',
+    description: '深研循环（一句话交付带引用报告）：查询扇出 → parallel/searxng/免费引擎并行 → 去重 + 域多样 → 抓正文 → 带 [n] 引用的 Markdown 报告，并回报「每答调用数」。适合需要多源交叉核验的问题；简单查询仍用 search_web 快路径（更省调用）。',
+    parameters: {
+      query: { type: 'string', required: true, description: '研究问题（自然语言即可）' },
+      objective: { type: 'string', description: 'Parallel：要找什么（缺省＝query）' },
+      sessionId: { type: 'string', description: 'Parallel：稳定会话 id（免费档按它限速；同会话复用同一值）' },
+      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎集合（默认 parallel+searxng+duckduckgo）' },
+      variants: { type: 'number', description: '扇出查询条数（默认 4）' },
+      maxSources: { type: 'number', description: '纳入报告并抓正文的来源数（默认 5）' },
+      fetch: { type: 'boolean', description: '是否抓正文（默认 true；false＝只用密集摘录，更快更省）' },
+    },
+    output: { schema: deepSchema, render: (_a: any, v: any) => [{ type: 'text', text: String(v?.report ?? (v?.ok ? 'ok' : 'error: ' + (v?.error ?? ''))) }] },
+    async execute(args: any) {
+      const ck = `deep:${args.query}:${(args.engines ?? []).join(',')}:${args.maxSources ?? 5}:${args.fetch ?? true}:${args.sessionId ?? ''}`
+      const hit = store.get(ck)
+      if (hit) return hit
+      const r = await safe(() => deepResearch({
+        query: args.query, objective: args.objective, sessionId: args.sessionId,
+        engines: args.engines, variants: args.variants, maxSources: args.maxSources, fetch: args.fetch,
+        searxngBase: config.searxngBase, tavilyKey: config.tavilyKey, serperKey: config.serperKey, jinaKey: config.jinaKey,
+      }))
+      if (!r.ok) {
+        return {
+          ok: false, query: String(args.query ?? ''), queries: [], report: 'error: ' + r.error, sources: [],
+          stats: { engineCalls: 0, queries: 1, sources: 0, fetched: 0, callsPerAnswer: 0 }, error: r.error,
+        }
+      }
+      store.bump('search_deep')
+      store.set(ck, r.value)
+      return r.value
     },
   })
 

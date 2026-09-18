@@ -160,21 +160,105 @@ export async function searchSerper(query: string, key: string, maxResults = 10):
   }))
 }
 
+/** Parallel Search MCP（**无账号 / 无 key / 无卡** · 2026-09-18 实测可用）
+ *  形状＝objective + 一次多查询扇出（≤4 条）+ 稳定 session_id；返回**密集摘录**（excerpts），
+ *  一次调用往往即可作答，省掉「先搜再逐页抓」的多跳成本。免费档按 session_id 限速。 */
+export async function searchParallel(
+  query: string,
+  maxResults = 10,
+  opts: { objective?: string; sessionId?: string; extraQueries?: string[] } = {},
+): Promise<SearchResult[]> {
+  const queries = [query, ...(opts.extraQueries ?? [])]
+    .map((q) => String(q).trim())
+    .filter(Boolean)
+    .slice(0, 4)
+  const data = await httpPostJSON(
+    'https://search.parallel.ai/mcp',
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'web_search',
+        arguments: {
+          objective: opts.objective ?? query,
+          search_queries: queries,
+          session_id: opts.sessionId ?? 'dsh-search-pro',
+        },
+      },
+    },
+    { headers: { accept: 'application/json, text/event-stream' }, timeoutMs: 60000 },
+  )
+  const text = data?.result?.content?.[0]?.text
+  if (typeof text !== 'string') return []
+  let payload: any
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    return []
+  }
+  const results = Array.isArray(payload?.results) ? payload.results : []
+  return results
+    .slice(0, maxResults)
+    .map((r: any) => ({
+      title: String(r.title ?? r.url ?? ''),
+      url: normalizeUrl(String(r.url ?? '')),
+      snippet: (Array.isArray(r.excerpts) ? r.excerpts.join(' … ') : String(r.snippet ?? '')).slice(0, 600),
+      source: 'parallel',
+    }))
+    .filter((r: SearchResult) => r.url)
+}
+
+/** SearXNG 自托管 JSON API（无 key · 只绑本机 127.0.0.1）——零成本底座。
+ *  实例未起时不阻塞：调用方 catch → 空数组，其它引擎照样出结果。 */
+export async function searchSearxng(
+  query: string,
+  baseUrl = 'http://127.0.0.1:8888',
+  maxResults = 10,
+  opts: { categories?: string; language?: string } = {},
+): Promise<SearchResult[]> {
+  const root = String(baseUrl).replace(/\/+$/, '')
+  const qs = new URLSearchParams({ q: query, format: 'json', safesearch: '0' })
+  if (opts.categories) qs.set('categories', opts.categories)
+  if (opts.language) qs.set('language', opts.language)
+  const raw = await httpGet(`${root}/search?${qs.toString()}`, { timeoutMs: 20000 })
+  const data = JSON.parse(raw)
+  const results = Array.isArray(data?.results) ? data.results : []
+  return results
+    .slice(0, maxResults)
+    .map((r: any) => ({
+      title: String(r.title ?? ''),
+      url: normalizeUrl(String(r.url ?? '')),
+      snippet: String(r.content ?? '').slice(0, 400),
+      source: `searxng${Array.isArray(r.engines) && r.engines.length ? ':' + r.engines.join('+') : ''}`,
+    }))
+    .filter((r: SearchResult) => r.url)
+}
+
 export interface SearchWebArgs {
   query: string
-  engines?: string[] // duckduckgo|bing|brave|tavily|serper
+  engines?: string[] // duckduckgo|bing|brave|tavily|serper|parallel|searxng
   lang?: string
   pages?: number
   tavilyKey?: string
   serperKey?: string
+  /** SearXNG 自托管实例根地址（默认 http://127.0.0.1:8888） */
+  searxngBase?: string
+  /** Parallel：自然语言「要找什么」（缺省＝query）与稳定会话 id（免费档限速按它算） */
+  objective?: string
+  sessionId?: string
+  /** Parallel：随主查询一起扇出的补充查询（≤3 条） */
+  extraQueries?: string[]
   /** 时间过滤（只对 duckduckgo 生效）：'w'/'m'/'y'（周/月/年）或 'YYYY-MM-DD..YYYY-MM-DD'（绝对区间） */
   timeRange?: string
 }
 
 /** 多引擎聚合搜索：并行调用 → 去重 → 按页数扩充 */
 export async function searchWeb(args: SearchWebArgs): Promise<SearchResult[]> {
-  // 默认 duckduckgo + brave（两个免费无 key 引擎，互为兜底；DDG 反爬时 Brave 顶住）
-  const engines = args.engines?.length ? args.engines : ['duckduckgo', 'brave']
+  // 默认四通道：parallel（无钥匙·密集摘录）+ searxng（自托管底座）+ duckduckgo/brave（免费兜底）。
+  // 实测（2026-09-18 带标注评测）：只挂 parallel 时 engineCoverage 是 **parallel-only**（单点）；
+  // 把自托管 searxng 拉进默认组，聚合里才有第二条活通道
+  const engines = args.engines?.length ? args.engines : ['parallel', 'searxng', 'duckduckgo', 'brave']
   const pages = Math.max(1, Math.min(3, args.pages ?? 1))
   const all: SearchResult[] = []
   const jobs: Promise<SearchResult[]>[] = []
@@ -185,6 +269,14 @@ export async function searchWeb(args: SearchWebArgs): Promise<SearchResult[]> {
     else if (e === 'brave') jobs.push(searchBrave(args.query, 10 * pages).catch(() => []))
     else if (e === 'tavily' && args.tavilyKey) jobs.push(searchTavily(args.query, args.tavilyKey, 8).catch(() => []))
     else if (e === 'serper' && args.serperKey) jobs.push(searchSerper(args.query, args.serperKey, 10).catch(() => []))
+    else if (e === 'parallel') jobs.push(searchParallel(args.query, 10 * pages, { objective: args.objective, sessionId: args.sessionId, extraQueries: args.extraQueries }).catch(() => []))
+    else if (e === 'searxng') jobs.push(searchSearxng(args.query, args.searxngBase, 10 * pages).catch(() => []))
+  }
+  // 扇出也对自托管引擎生效：补充查询走 searxng（本机零成本，最多 2 条，避免放大调用数）
+  if (engines.includes('searxng') && args.extraQueries?.length) {
+    for (const q of args.extraQueries.slice(0, 2)) {
+      jobs.push(searchSearxng(q, args.searxngBase, 10).catch(() => []))
+    }
   }
   const settled = await Promise.all(jobs)
   for (const rs of settled) all.push(...rs)
