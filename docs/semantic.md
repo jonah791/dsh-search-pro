@@ -174,21 +174,46 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A17 | 观测覆盖全部 23 工具（无旁路） | 收口在 `reg()` 内层——**23 个工具的唯一注册入口**，故覆盖率为工具数本身；新增工具只要走 `reg()` 即被观测（§4.4 调用点清单） | **待线上验收**（覆盖率由构造保证，非逐点登记） |
 | A18 | **`search_deep` 的输出能被人读到**（render 契约） | `dsh-tools` 的 render 必须返回 **`[{ type:'text', text }]`**；2026-09-18 实测：返回裸字符串数组时 **trace 记 `ok:true`/8.6 s 而界面显示为空**（沉默失败）⇒ 修后线上 `search_deep` 输出完整带 `[n]` 引用的报告 | **已实测（2026-09-18，线上 4 源/抓 4）** |
 | A19 | **`search_web` 默认引擎组含两条活通道**（抗单点） | `scripts/search-bench-eval.mjs` 的 `engineCoverage`：修复前 **`parallel` 独苗**；把 `searxng` 拉进默认组后 = **`parallel 37/80` + `searxng 13/63`**（⚠ 前提＝SearXNG 容器健康，见 A20 与 §9 的端口冲突坑） | **已实测（2026-09-18）** |
-| A20 | **自托管 SearXNG 的 JSON 通道可用** | `curl 'http://127.0.0.1:8888/search?q=…&format=json'` → HTTP 200 / `results=31` / `engines_used=[brave, google cse]`；容器需 **代理 env** + **`network_mode: host`** + `SEARXNG_PORT`；**地址占用恢复法**：`docker compose down --remove-orphans` → `up -d`（`--force-recreate` 会留下霸占 host 端口的僵尸 → 容器进 restart 循环） | **已实测（2026-09-18）** |
+| A20 | **自托管 SearXNG 的 JSON 通道可用** | `curl 'http://127.0.0.1:18788/search?q=…&format=json'` → HTTP 200 / 20~35 条 / `engines_used=[google cse, duckduckgo, …]`；容器需 **代理 env** + **`network_mode: host`** + **`SEARXNG_PORT=18788`**（**端口从 8888 迁走了**，见 A23 与 §9 的事故记录）；恢复法 `docker compose down --remove-orphans` → `up -d`（`--force-recreate` 会留端口僵尸） | **已实测（2026-09-18）** |
 | A21 | **带标注评测可给出可辩护的数字**（hit@k/MRR） | `node scripts/search-bench-eval.mjs` → **`hit@3 8/8 · hit@5 8/8 · MRR 0.938`**；标签自身也被体检过（`docs.readthedocs.**com**`，原标签写 `.io` 会把真命中记成 MISS ⇒ 先修仪器再改系统） | **已实测（2026-09-18）** |
-| A22 | **回归基准可复跑** | `node scripts/search-bench.mjs`（12 条固定查询）→ `queryHitRate 12/12 · avgDomains 5.8`；`node --test tests/*.test.mjs` → **40/40** | **已实测（2026-09-18）** |
+| A22 | **回归基准可复跑** | `node scripts/search-bench.mjs`（12 条固定查询）→ `queryHitRate 12/12 · avgDomains 5.8`；`node --test tests/*.test.mjs` → **68/68** | **已实测（2026-09-18）** |
+| A23 | **SearXNG 就绪门：查询前把通道带起来**（探活→冷启 VM→容器健康自愈→轮询；并发单飞） | `node scripts/searxng-gate-proof.mjs 4 8`（**Windows 侧**跑，与宿主同侧语义）→ 逐轮 `ready=true`；`npm test` → `tests/searxng.test.mjs` 11 例（四态 + 单飞 + 预算耗尽 + 保活开关 + **Restarting 自愈**）| **已实测（2026-09-18 第二轮）** |
+| A24 | **逐通道读数可读**（`channels[]`：谁出结果 / 谁空手 / 为什么） | 工具结果与 `search-trace.jsonl` 共用同一读数：`channels` 字段形如 `searxng=ok:20@1832ms/direct ; brave=fail:0@900ms(too many requests)`；`npm test` → `channelsOf/formatChannels/composeSearchEntry`（含脱敏 + 键位固定断言）| **已实测** |
+| A25 | **领域路由：代码类问题自动带 GitHub、研究类带学术三源** | `search_deep` 报告的「领域路由」行 + 工具参数 `routing=off` 可关；`npm test` → `tests/routing.test.mjs` 5 例（中英双命中/退化输入）| **已实测** |
+| A26 | **多引擎交叉验证标记** | `search_deep` 报告每条来源标 `★多引擎一致`（≥2 条通道独立命中同一 URL），并在汇总行给 `多引擎一致 N 条` | **已实测** |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 **回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（当前 HEAD `b5c5a20`）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。
 
 ## 8 · 与实现的关系
 
-- **主实现与模块职责**：`src/index.ts`（装配 + 23 工具 + 渲染器 `renderList/renderContent/renderShare`）；`engines.ts` 多引擎与聚合｜`deep.ts` 学术/专利/GitHub/社区/WHOIS/子域/DNS/Shodan｜`robust.ts` 四通道反爬 + `detectChallenge`｜`share.ts` 网盘 + 磁力三源｜`osint.ts` Sourcegraph/Ahmia/HIBP｜`archive.ts` Wayback CDX/还原/archive.today｜`fetch.ts` Jina→自抓降级 + Tor｜`buildQuery.ts` 查询改写｜`store.ts` 内存缓存/配额｜`util.ts` HTTP/HTML/URL/去重｜**`trace.ts` 自证轨迹层**（`resolveHome`/`paramsDigest`/`resultCount`/`resultOk`/`channelOf`/`attemptsOf`/`errorOf`/**`composeSearchEntry`**（合成单一真源）+ 薄 IO，2026-09-14 批次 S4-A 新增）。
-- **测试**：`tests/util.test.mjs`（20）+ `tests/esm-contract.test.mjs`（既有 ESM 契约守卫）+ `tests/trace.test.mjs`（**20**，批次 S4-A 新增）= **40 例**，`npm test` 一条命令复跑。
+- **主实现与模块职责**：`src/index.ts`（装配 + **24** 工具 + 渲染器 `renderList/renderContent/renderShare`）；`engines.ts` 多引擎与聚合（含**逐通道读数** `ChannelStat`）｜**`searxng.ts` 就绪门**（`ensureSearxng`/`wslRun`/`searxngSearchUrl`/`parseSearxngResults`/`searxngDiagnostics`/`keepAliveCmd`，2026-09-18 第二轮新增，U10 闭环）｜`research.ts` 深研循环（含**领域路由** `routeIntents` 与多引擎交叉验证标记）｜`deep.ts` 学术/专利/GitHub/社区/WHOIS/子域/DNS/Shodan｜`robust.ts` 四通道反爬 + `detectChallenge`｜`share.ts` 网盘 + 磁力三源｜`osint.ts` Sourcegraph/Ahmia/HIBP｜`archive.ts` Wayback CDX/还原/archive.today｜`fetch.ts` Jina→自抓降级 + Tor｜`buildQuery.ts` 查询改写｜`store.ts` 内存缓存/配额｜`util.ts` HTTP/HTML/URL/去重｜**`trace.ts` 自证轨迹层**（`resolveHome`/`paramsDigest`/`resultCount`/`resultOk`/`channelOf`/`attemptsOf`/**`channelsOf`/`formatChannels`**/`errorOf`/**`composeSearchEntry`**（合成单一真源）+ 薄 IO）。
+- **测试**：`tests/util.test.mjs`（20）+ `tests/esm-contract.test.mjs` + `tests/trace.test.mjs`（20）+ **`tests/searxng.test.mjs`（24：就绪门四态/单飞/预算耗尽/保活/Restarting 自愈 + `simplifyQuery` + trace `channels`）** + **`tests/routing.test.mjs`（5）** = **69 例**，`npm test` 一条命令复跑。
 - **同语义副本**：无（无跨仓平行语义）。
 - **未实现/未验证**：`archive.ts:archiveTodayLookup` **已实现但未接入任何工具**（死代码）；README 提到的 SearXNG 增强**未实现**；`community` 的 `tieba` 平台仅在类型里（`CommunityPlatform`），`COMMUNITY_PLATFORMS` 与工具 enum 均只含 `reddit/hn/4chan`。
 
 ## 9 · 实践修订记录
+
+- **2026-09-18（第二轮）· U10 闭环 + 逐通道读数 + 领域路由（测试 40→69）**
+  - **U10 的最终定性，把我前两轮的判词都推翻了**：既不是「绑定地址不对」，也不是「Windows↔WSL 可达性间歇」。真因两条叠加——
+    ① 容器在 8888 上 **crash-loop**：`docker logs` = `RuntimeError: Address already in use (os error 98)`，`inspect` = `status=restarting restarts=7`；
+    ② 我的就绪门当时只把「Windows 直连」当就绪判据，**失败就提前 `return []`**——把唯一可用的 **WSL 内 curl** 那条路也掐了。
+    **关键取证难点**：WSL `ss -ltn` 与 Windows `Get-NetTCPConnection -LocalPort 8888` **两边都读不到 8888 的持有者**
+    （`.wslconfig` 是 `networkingMode=mirrored` ⇒ 端口空间与 Windows 共享，冲突来源不可见）。
+    ⇒ 换到 **18788**（低于 Linux 32768-60999 与 Windows 49152-65535 两段临时端口区）后，**3 秒内 200 / 35 条**。
+  - **新不变量 ①**：「服务在答」与「Windows 直连能到」是**两个判据**——就绪门不得把后者当前者（否则第二路会被误杀）。
+    **新不变量 ②**：容器 `Restarting/Exited` ⇒ 自愈走文档化的 `docker compose down --remove-orphans && up -d`（`--force-recreate` 会留端口僵尸）。
+    **新不变量 ③**：聚合类工具必须落 `channels[]` 读数（`engine/ok/count/ms/via/error`），「0 条」与「为什么 0 条」不得分离。
+  - **通道的固有边界（如实记）**：**同一查询连打会把上游打到限流**——SearXNG 如实报 `unresponsive_engines:
+    [['brave','Suspended: too many requests'], ['duckduckgo','CAPTCHA']]`，此时靠 `google cse` 等仍能出 20+ 条。
+    ⇒ **验收必须用真实使用形态（查询是变的）**；缓解三件：空结果**重试一次** + 第二发用**简化查询**（前 4 词）+
+    补 `mojeek`/`marginalia` 两条独立索引 + 上游超时 6/10 → **8/14**。
+  - **新增能力**：① `src/searxng.ts` 就绪门（探活→冷启 VM→容器健康自愈→轮询→有界保活 120 min；并发**单飞**）；
+    ② `search_web` 结果带 `channels`，trace 增 `channels` 字段（脱敏 + 键位固定）；③ 深研**领域路由** `routeIntents`
+    （代码类→GitHub 仓库、研究类→学术三源，`routing=off` 可关）；④ 来源标 **★多引擎一致**（≥2 通道独立命中）。
+  - **改环境的动作（留痕）**：容器端口 8888 → **18788**（compose + settings + 插件默认 `searxngBase`）；引擎启用 `mojeek`/`marginalia`。
+  - **验收与回归**：`node --test tests/*.test.mjs` → **69/69**；`node scripts/searxng-gate-proof.mjs 4 6` → 逐轮 `ready=true`
+    （结果条数受上游限流影响，属 U12 边界）；`tsc --noEmit` 干净。
 
 - **2026-09-18 · 检索增强批次（两引擎 + `search_deep` + 评测；工具面 23→24）**
   - **新增能力（语义扩张）**：① 引擎 **`parallel`**（`https://search.parallel.ai/mcp`，**无账号/无 key**；形状＝`objective` + 一次多查询扇出 + 稳定 `session_id`，返回**密集摘录**）；② 引擎 **`searxng`**（自托管 JSON API，默认 `http://127.0.0.1:8888`，配置项 `searxngBase`）；③ 工具 **`search_deep`**（`src/research.ts:deepResearch`）＝ 扇出 → 多引擎并行 → 去重 + 每域≤2 → **相关性 rerank** → **缺口补查 gap fill** → 抓正文 → **带 `[n]` 引用的报告**，并回报 `stats{engineCalls,queries,sources,fetched,callsPerAnswer,rounds,gapFilled}`。
@@ -270,15 +295,30 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
   在标题/摘录中出现次数），不是学习型 reranker。调研中出现的 **RankLLM MCP（SIGIR 2026，提供
   `retrieve-and-rerank` / `rerank` 两个工具）** 是现成的下一级选项。倾向：先看英文技术类查询的实际痛点是否需要，
   再决定是否引入一个 Java/Python 侧服务（运行期依赖成本高）。
-- **U10（新，2026-09-18 · 未闭环）宿主是 Windows、SearXNG 在 WSL：直连通道不通 ⇒ `searxng` 在工具路径上等于没接**
-  - **实测**：① Windows 侧 `curl http://127.0.0.1:8888/…` → **`000`（连接失败）**；同一条 URL 在 WSL 内 → **200（31~38 条）**。
-    ② 于是**插件路径**（web 进程在 Windows）上 `searxng` 每轮贡献 0 条——由 `search_deep` 的「通道贡献」行暴露（`parallel=10 · searxng=0（⚠）`）。
-    ③ 已加 fallback（直连失败 → WSL 内 curl），但宿主侧 `wsl.exe -d Ubuntu -- bash -lc "curl …"` **返回空**（`wsl.exe` 会重解析 argv；harness 自己的 `wsl` 工具正是为此走 **base64 通道**）⇒ **fallback 尚不可靠**，故本条未闭环。
-  - **影响范围（别混读）**：`search-bench-eval` 在 **WSL 内**跑出的 `engineCoverage parallel 41/80 + searxng 17/62` 对**引擎本身**成立；**工具路径**上的真实覆盖仍是 **parallel 单通道**。
-  - **三条候选修法**（需裁决）：① fallback 改 **base64 通道**调 `wsl.exe`（与 harness 同款，改动最小）；② 容器改 **bridge + `127.0.0.1:8888:8080`**（Windows 直连可用），代价是容器需另寻到桌面 Clash 的出网路径；③ 把 SearXNG 暴露到 Windows 可达地址（WSL IP / `netsh portproxy`），代价是 IP 易变或需管理员权限。
-  - **12:49 更新（负结果矩阵·别重试）**：同一 URL 在 Windows 侧 Node 里实测——**裸 `wsl.exe` + 剥代理 env + `curl --noproxy '*'` 曾成功（10 条/867 ms），但随后同一条代码复跑变 0 条/6.9 s**；绝对路径 `C:\WINDOWS\System32\wsl.exe` → 0 条；写文件 + `\\wsl.localhost\Ubuntu` 读回（绕开管道 stdio）→ 0 条。
-    ⇒ 结论收敛为：**Windows→WSL 的 8888 可达性是间歇的**（曾经 867 ms 走通直连，属 localhost 转发窗口），而 **WSL curl fallback 不可靠**。
-    **下一步（下轮第一件事）**：把容器改成 **bridge + `127.0.0.1:8888:8080`**（彻底不需要 wsl.exe 参与），并给容器单独解决出网；同时给 `search_deep` 的 trace 补 **per-channel 错误字段**，让下一次失败自解释。
+- **~~U10（2026-09-18 · 已闭环 · 第二轮）~~ 宿主是 Windows、SearXNG 在 WSL：`searxng` 在工具路径上等于没接**
+  - **最终定性（推翻了两轮猜想）**：既不是「绑定地址不对」，也不是「可达性间歇」——
+    **① 容器在 8888 上 crash-loop**（granian `RuntimeError: Address already in use (os error 98)`），
+    **② 我自己的就绪门当时只看「Windows 直连」，直连不通就提前 `return []`，把唯一可用的 WSL 内 curl 那条路也掐了**。
+  - **证据链**：`docker inspect` → `status=restarting restarts=7`；`docker logs` → `RuntimeError: Address already in use`；
+    WSL `ss -ltn` 与 Windows `Get-NetTCPConnection -LocalPort 8888` **两边都读不到持有者**（`.wslconfig` 是
+    `networkingMode=mirrored` ⇒ 端口空间与 Windows 共享，冲突来源不可见）⇒ **换到 18788（低于 Linux 32768-60999
+    与 Windows 49152-65535 两段临时端口区）后立刻 `Up`**，WSL 侧 3 秒内 200 / 35 条。
+  - **修法（已上线）**：`src/searxng.ts` 的**就绪门**——`probe-direct`（便宜）→ `probe-wsl`（**宿主实际走的那条**）→
+    `boot-vm`（WSL VM 空闲 ~60 s 自动关机是**另一个**真因，故门要先把它带起来）→ `container-health`
+    （`Restarting/Exited` ⇒ `compose down --remove-orphans && up -d` **自愈**）→ 轮询 → 有界保活（120 min）；
+    并发扇出**单飞**共享同一次带起；**门失败不再提前返回**（继续走「直连 → WSL curl」两条路）。
+  - **验收**：`node scripts/searxng-gate-proof.mjs 4 8`（Windows 侧）逐轮 `ready=true`；`tests/searxng.test.mjs` 11 例离线锁死。
+- **U11（新，2026-09-18 · 未闭环）SearXNG 的实际监听面仍是 `*:18788`**：`ss -ltn` 显示 `*:18788`，
+  即镜像入口脚本**没吃下** `SEARXNG_BIND_ADDRESS=127.0.0.1`（实测：只改 `settings.yml` 也无效）。
+  mirrored 网络下这意味着端口可能与 Windows 侧共享暴露面。**未验证**是否能从局域网 IP 访问
+  （`curl --noproxy '*' http://192.168.50.204:18788/…` 在 VM 冷启窗口返回 000，证据不足）。
+  倾向：下轮先做一次**明确的暴露面取证**（VM 热时从局域网侧试），再决定是否改用
+  `bridge + 127.0.0.1:18788:8080` 发布（代价＝容器出网要另配 `host.docker.internal:16888`）。
+- **U12（新，2026-09-18 · 通道固有边界）上游引擎会限流**：同一查询连打若干次后，SearXNG 自己会如实报
+  `unresponsive_engines: [['brave','Suspended: too many requests'], ['duckduckgo','CAPTCHA']]`，
+  此时仍可能由 `google cse` 等引擎给出 20+ 条。**已做**：① 抓取层「空结果重试一次」；
+  ② 补两条独立索引（`mojeek`/`marginalia`）当第三条腿；③ 把 `unresponsive_engines` 折进通道读数与报告。
+  **仍存**：极端限流下该通道可能整轮空手——报告里会显示为 `0 条（已重试一次；unresponsive=…）`，**不静默**。
 
 ## 附 · 快速取证命令
 

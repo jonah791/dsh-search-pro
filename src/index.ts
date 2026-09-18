@@ -1,4 +1,4 @@
-/** dsh-search-pro：三层深度搜索插件（表层多引擎 / 深网挖掘 / Tor 代理）· 23 工具 */
+/** dsh-search-pro：三层深度搜索插件（表层多引擎 / 深网挖掘 / Tor 代理）· 24 工具 */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -37,8 +37,17 @@ export interface Config {
   githubToken: string
   jinaKey: string
   defaultLang: string
-  /** SearXNG 自托管实例根地址（JSON API，无 key；只绑本机）——默认 http://127.0.0.1:8888 */
+  /** SearXNG 自托管实例根地址（JSON API，无 key；只绑本机）——默认 http://127.0.0.1:18788 */
   searxngBase?: string
+  /** SearXNG 就绪门：查询前探活 → 冷启 WSL VM → 幂等确保容器 → 轮询到就绪（默认开）。
+   *  关掉它＝回到「VM 一关机通道就 0 条」的老样子（U10 事故形状）。 */
+  searxngGate?: boolean
+  /** 就绪等待预算（ms，默认 15000）。 */
+  searxngReadyTimeoutMs?: number
+  /** 冷启成功后留保活进程的分钟数（默认 120，0＝不留）——钉住 WSL VM，免被空闲回收。 */
+  searxngKeepAliveMinutes?: number
+  /** searxng 在单次聚合里的预算封顶（ms，默认 15000）——超时不拖住其它通道。 */
+  searxngBudgetMs?: number
   cacheTtlMinutes?: number
 }
 
@@ -51,8 +60,29 @@ export const Config = z.object({
   githubToken: z.string().default(''),
   jinaKey: z.string().default(''),
   defaultLang: z.string().default('zh'),
-  searxngBase: z.string().default('http://127.0.0.1:8888'),
+  searxngBase: z.string().default('http://127.0.0.1:18788'),
+  searxngGate: z.boolean().default(true),
+  searxngReadyTimeoutMs: z.number().default(15000),
+  searxngKeepAliveMinutes: z.number().default(120),
+  searxngBudgetMs: z.number().default(15000),
   cacheTtlMinutes: z.number().default(60),
+})
+
+/** 单通道读数（工具结果里的 `channels[]`）——与 trace.ts 的 `channelsOf` 同形。 */
+const channelsSchema = (): any => ({
+  type: 'array',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      engine: { type: 'string' },
+      ok: { type: 'boolean' },
+      count: { type: 'number' },
+      ms: { type: 'number' },
+      via: { type: 'string' },
+      error: { type: 'string' },
+    },
+  },
 })
 
 const resultsSchema = (extra: Record<string, unknown> = {}): any => ({
@@ -178,10 +208,10 @@ export function apply(ctx: Context, config: Config): void {
   /* ── B · 表层检索组 ── */
   reg({
     name: 'search_web',
-    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Brave / Bing 免费 + 可选 Tavily/Serper API），聚合去重。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
+    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Brave / Bing 免费 + 可选 Tavily/Serper API），聚合去重，并回报**逐通道读数**（channels：谁出结果、谁空手、为什么空手）。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
     parameters: {
       query: { type: 'string', required: true, description: '搜索词' },
-      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 parallel+duckduckgo+brave）' },
+      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 parallel+searxng+duckduckgo+brave）' },
       lang: { type: 'string', description: '语言提示' },
       pages: { type: 'number', description: '翻页深度 1-3（默认 1）' },
       objective: { type: 'string', description: 'Parallel：自然语言说明「要找什么」（缺省＝query）' },
@@ -189,19 +219,22 @@ export function apply(ctx: Context, config: Config): void {
       extraQueries: { type: 'array', items: { type: 'string' }, description: 'Parallel：与主查询一次性扇出的补充查询（≤3 条，比链式重搜便宜）' },
       timeRange: { type: 'string', description: '时间过滤（只对 duckduckgo 生效）：w=一周内 m=一月内 y=一年内，或 YYYY-MM-DD..YYYY-MM-DD 绝对区间。找新资源用' },
     },
-    output: { schema: resultsSchema(), render: renderList },
+    output: { schema: resultsSchema({ channels: channelsSchema() }), render: renderList },
     async execute(args: any) {
       const ck = `web:${args.query}:${(args.engines ?? []).join(',')}:${args.pages ?? 1}:${args.timeRange ?? ''}:${args.sessionId ?? ''}`
       const hit = store.get(ck)
       if (hit) return hit
+      const channels: any[] = []
       const r = await safe(() => searchWeb({
         query: args.query, engines: args.engines, lang: args.lang ?? config.defaultLang,
         pages: args.pages, tavilyKey: config.tavilyKey, serperKey: config.serperKey, timeRange: args.timeRange,
         searxngBase: config.searxngBase, objective: args.objective, sessionId: args.sessionId, extraQueries: args.extraQueries,
-      }))
-      if (!r.ok) return { ok: false, error: r.error }
+        searxngGate: config.searxngGate, searxngReadyTimeoutMs: config.searxngReadyTimeoutMs,
+        searxngKeepAliveMinutes: config.searxngKeepAliveMinutes, searxngBudgetMs: config.searxngBudgetMs,
+      }, (s) => channels.push(s)))
+      if (!r.ok) return { ok: false, error: r.error, channels }
       store.bump('search_web')
-      const out = { ok: true, count: r.value.length, results: r.value }
+      const out = { ok: true, count: r.value.length, results: r.value, channels }
       store.set(ck, out)
       return out
     },
@@ -260,6 +293,15 @@ export function apply(ctx: Context, config: Config): void {
           engineCalls: { type: 'number' }, queries: { type: 'number' }, sources: { type: 'number' },
           fetched: { type: 'number' }, callsPerAnswer: { type: 'number' },
           rounds: { type: 'number' }, gapFilled: { type: 'number' },
+          crossChecked: { type: 'number', description: '≥2 条通道独立命中的来源数（可信度提示）' },
+        },
+      },
+      channels: channelsSchema(),
+      routing: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          kind: { type: 'string' }, added: { type: 'array', items: { type: 'string' } }, note: { type: 'string' },
         },
       },
       error: { type: 'string' },
@@ -268,7 +310,7 @@ export function apply(ctx: Context, config: Config): void {
 
   reg({
     name: 'search_deep',
-    description: '深研循环（一句话交付带引用报告）：查询扇出 → parallel/searxng/免费引擎并行 → 去重 + 域多样 → 抓正文 → 带 [n] 引用的 Markdown 报告，并回报「每答调用数」。适合需要多源交叉核验的问题；简单查询仍用 search_web 快路径（更省调用）。',
+    description: '深研循环（一句话交付带引用报告）：查询扇出 → parallel/searxng/免费引擎并行 → 去重 + 域多样 → 抓正文 → 带 [n] 引用的 Markdown 报告；按**领域路由**自动追加 GitHub（代码类）或学术三源（研究类）；标注 ★多引擎一致 的来源；并回报「每答调用数」与**逐通道读数**（谁空手、为什么）。适合需要多源交叉核验的问题；简单查询仍用 search_web 快路径（更省调用）。',
     parameters: {
       query: { type: 'string', required: true, description: '研究问题（自然语言即可）' },
       objective: { type: 'string', description: 'Parallel：要找什么（缺省＝query）' },
@@ -277,21 +319,26 @@ export function apply(ctx: Context, config: Config): void {
       variants: { type: 'number', description: '扇出查询条数（默认 4）' },
       maxSources: { type: 'number', description: '纳入报告并抓正文的来源数（默认 5）' },
       fetch: { type: 'boolean', description: '是否抓正文（默认 true；false＝只用密集摘录，更快更省）' },
+      routing: { type: 'string', enum: ['auto', 'off'], description: '领域路由（默认 auto：代码类问题追加 GitHub、研究类追加学术三源；off＝只用网页通道）' },
     },
     output: { schema: deepSchema, render: (_a: any, v: any) => [{ type: 'text', text: String(v?.report ?? (v?.ok ? 'ok' : 'error: ' + (v?.error ?? ''))) }] },
     async execute(args: any) {
-      const ck = `deep:${args.query}:${(args.engines ?? []).join(',')}:${args.maxSources ?? 5}:${args.fetch ?? true}:${args.sessionId ?? ''}`
+      const ck = `deep:${args.query}:${(args.engines ?? []).join(',')}:${args.maxSources ?? 5}:${args.fetch ?? true}:${args.sessionId ?? ''}:${args.routing ?? 'auto'}`
       const hit = store.get(ck)
       if (hit) return hit
       const r = await safe(() => deepResearch({
         query: args.query, objective: args.objective, sessionId: args.sessionId,
         engines: args.engines, variants: args.variants, maxSources: args.maxSources, fetch: args.fetch,
-        searxngBase: config.searxngBase, tavilyKey: config.tavilyKey, serperKey: config.serperKey, jinaKey: config.jinaKey,
+        searxngBase: config.searxngBase, searxngGate: config.searxngGate,
+        searxngReadyTimeoutMs: config.searxngReadyTimeoutMs, searxngKeepAliveMinutes: config.searxngKeepAliveMinutes,
+        tavilyKey: config.tavilyKey, serperKey: config.serperKey, jinaKey: config.jinaKey,
+        githubToken: config.githubToken, routing: args.routing,
       }))
       if (!r.ok) {
         return {
           ok: false, query: String(args.query ?? ''), queries: [], report: 'error: ' + r.error, sources: [],
-          stats: { engineCalls: 0, queries: 1, sources: 0, fetched: 0, callsPerAnswer: 0 }, error: r.error,
+          stats: { engineCalls: 0, queries: 1, sources: 0, fetched: 0, callsPerAnswer: 0, rounds: 0, gapFilled: 0, crossChecked: 0 },
+          channels: [], routing: { kind: 'general', added: [], note: '未执行' }, error: r.error,
         }
       }
       store.bump('search_deep')

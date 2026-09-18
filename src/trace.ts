@@ -1,7 +1,7 @@
 /**
  * 检索面自证轨迹（可维护性 S4 证据层 · 2026-09-14 批次 S4-A）。
  *
- * 动机：本插件有 **23 个工具**，每次调用的真实经过（走了哪个引擎 / 反爬通道链走到哪一级 /
+ * 动机：本插件有 **24 个工具**，每次调用的真实经过（走了哪个引擎 / 反爬通道链走到哪一级 /
  * 聚合去重后剩多少条 / 耗时多久 / 断在哪一段）**只写 `ctx.logger`**，而宿主 logger **不落盘**。
  * 更贵的是本插件曾有一个真缺陷：`catch {}` 吞掉了 ESM 下必抛的 `require`，导致每次 headless
  * 调用泄漏一个 `%TEMP%\dsh-robust-<ts>` 目录（实测 15 个 / 每个 ~12MB），**而日志一片干净**——
@@ -49,6 +49,9 @@ export interface SearchTraceEntry {
   channel: string
   /** 反爬通道尝试次数（`attempts.length`，Q3：走到了第几级）。 */
   attempts: number
+  /** **逐通道读数**（Q3/Q4 的 per-channel 版本，2026-09-18 第二轮）：`engine=ok:12@1840ms/direct ; …`。
+   *  聚合类工具（`search_web` / `search_deep`）带 `channels[]` 时才有内容；空串＝该工具没有多通道语义。 */
+  channels: string
   /** 调用耗时（ms；boot=0）。 */
   durationMs: number
   /** 是否成功（结果体 `ok===false` 或有非空 `error` 或抛错 → false）。 */
@@ -222,6 +225,57 @@ export function attemptsOf(result: unknown): number {
   return Array.isArray(attempts) ? attempts.length : 0
 }
 
+/** 单通道读数（`search_web` / `search_deep` 结果里的 `channels[]` 形状）。 */
+export interface ChannelDigest {
+  engine: string
+  ok: boolean
+  count: number
+  ms?: number
+  via?: string
+  error?: string
+}
+
+/**
+ * 通道读数提取（纯函数，**Q3/Q4 的 per-channel 版本**）：只认 `engine` 为非空字符串的项；
+ * `count`/`ms` 非有限数设防；`error` 过 `redactText` + 截断 200（**与结果体的脱敏同一红线**）。
+ */
+export function channelsOf(result: unknown): ChannelDigest[] {
+  if (result === null || typeof result !== 'object') return []
+  const raw = (result as Record<string, unknown>)['channels']
+  if (!Array.isArray(raw)) return []
+  const out: ChannelDigest[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const r = item as Record<string, unknown>
+    const engine = typeof r['engine'] === 'string' ? r['engine'] : ''
+    if (engine === '') continue
+    const ms = typeof r['ms'] === 'number' && Number.isFinite(r['ms']) ? r['ms'] : undefined
+    const via = typeof r['via'] === 'string' && r['via'] !== '' ? r['via'] : undefined
+    const error =
+      typeof r['error'] === 'string' && r['error'] !== '' ? redactText(truncate(r['error'], 200)) : undefined
+    out.push({
+      engine: truncate(engine, 40),
+      ok: r['ok'] !== false,
+      count: typeof r['count'] === 'number' && Number.isFinite(r['count']) ? r['count'] : 0,
+      ...(ms !== undefined ? { ms } : {}),
+      ...(via !== undefined ? { via } : {}),
+      ...(error !== undefined ? { error } : {}),
+    })
+  }
+  return out
+}
+
+/** 通道读数 → 一行紧凑文本（trace 的 `channels` 字段）；总量截断（默认 500）。 */
+export function formatChannels(list: ChannelDigest[], maxLen = 500): string {
+  const text = list
+    .map((c) => {
+      const head = `${c.engine}=${c.ok ? 'ok' : 'fail'}:${c.count}${c.ms !== undefined ? `@${c.ms}ms` : ''}${c.via ? `/${c.via}` : ''}`
+      return c.error ? `${head}(${c.error})` : head
+    })
+    .join(' ; ')
+  return truncate(text, maxLen)
+}
+
 /** 失败文案提取（纯函数）：`error` 字段，脱敏 + 截断 500。 */
 export function errorOf(result: unknown, thrown?: unknown): string | undefined {
   if (thrown !== null && thrown !== undefined) {
@@ -263,6 +317,7 @@ export function composeSearchEntry(input: SearchComposeInput): SearchTraceEntry 
     count: thrown === null ? resultCount(input.result) : 0,
     channel: channelOf(input.result),
     attempts: attemptsOf(input.result),
+    channels: formatChannels(channelsOf(input.result)),
     durationMs: input.durationMs,
     ok: thrown === null && resultOk(input.result),
     ...(error !== undefined ? { error } : {}),
@@ -280,6 +335,7 @@ export function serializeTraceEntry(entry: SearchTraceEntry): string {
     count: entry.count,
     channel: entry.channel,
     attempts: entry.attempts,
+    channels: entry.channels,
     durationMs: entry.durationMs,
     ok: entry.ok,
     ...(entry.error !== undefined ? { error: entry.error } : {}),
