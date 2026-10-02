@@ -75,3 +75,23 @@ test('bing 端点必须是 cn.bing.com（防止日文语境回退）', () => {
   assert.doesNotMatch(body, /www\.bing\.com\/search/, 'searchBing 不得回退到 www.bing.com')
   assert.doesNotMatch(body, /mkt=|setlang=/, 'mkt/setlang 实测无效且污染结果，不得重新引入')
 })
+
+/**
+ * 默认通道组的成员资格（回归测试 · 尸体测试）。
+ *
+ * 2026-10-02 同批实测驱动的两个调整：
+ *   brave 移出：8/8 次 HTTP 429（370–428ms 快速拒绝）。换 4 个差异极大的查询（含单字符 "a"）
+ *     全 429 ⇒ **与查询无关**（出口/IP 级），无 key 下在本机出口 100% 不可用。
+ *   bing 补入：端点改 cn 域后 11/11 次请求成功（5 查询 × 2 轮 + 线上 1 次），
+ *     #1 恒为最权威源。填补 brave 移出后的通道缺口。
+ */
+test('默认引擎组含 bing、不含 brave（2026-10-02 实测驱动的通道调整）', () => {
+  const src = readFileSync(join(root, 'src', 'engines.ts'), 'utf8')
+  const m = src.match(/const engines = args\.engines\?\.length \? args\.engines : \[([^\]]+)\]/)
+  assert.ok(m, '未找到默认引擎组声明——守卫失效，请核对声明写法')
+  const list = m[1]
+  assert.match(list, /'bing'/, '实测可用的 bing 必须在默认组')
+  assert.doesNotMatch(list, /'brave'/, 'brave 实测 100% 429，不得回到默认组（可显式指定）')
+  assert.match(list, /'parallel'/, 'parallel 必须保留')
+  assert.match(list, /'duckduckgo'/, 'duckduckgo 必须保留')
+})

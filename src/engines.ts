@@ -372,10 +372,16 @@ export interface SearchWebArgs {
  *  `sink` 收**每一条通道**的 ok/count/ms/via/error——工具结果与 `search-trace.jsonl` 共用它，
  *  于是「某通道 0 条」不再是一个孤零零的数字，而是带原因的读数（2026-09-18 第二轮）。 */
 export async function searchWeb(args: SearchWebArgs, sink?: ChannelSink): Promise<SearchResult[]> {
-  // 默认四通道：parallel（无钥匙·密集摘录）+ searxng（自托管底座）+ duckduckgo/brave（免费兜底）。
+  // 默认通道：parallel（无钥匙·密集摘录）+ searxng（自托管底座）+ duckduckgo/bing（免费兜底）。
   // 实测（2026-09-18 带标注评测）：只挂 parallel 时 engineCoverage 是 **parallel-only**（单点）；
   // 把自托管 searxng 拉进默认组，聚合里才有第二条活通道
-  const engines = args.engines?.length ? args.engines : ['parallel', 'searxng', 'duckduckgo', 'brave']
+  // 2026-10-02 两处调整（同批实测驱动）：
+  //   ① brave 移出默认组——8/8 实测 HTTP 429（370–428ms 快速拒绝），换 4 个差异极大的查询
+  //      （含单字符 "a"）全 429 ⇒ 与查询无关，无 key 下在本机出口 100% 不可用，
+  //      留在组里只增噪音与白等。仍可显式指定 `engines:['brave']` 手动尝试（分支保留）。
+  //   ② bing 补进该位置——端点改 cn.bing.com 后 11/11 次请求成功（5 查询×2 轮 + 线上 1 次），
+  //      #1 恒为最权威源（百度百科 / python.org / kubernetes.io）。见 searchBing 的 JSDoc。
+  const engines = args.engines?.length ? args.engines : ['parallel', 'searxng', 'duckduckgo', 'bing']
   const pages = Math.max(1, Math.min(3, args.pages ?? 1))
   const all: SearchResult[] = []
   const jobs: Promise<SearchResult[]>[] = []

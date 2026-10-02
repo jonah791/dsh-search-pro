@@ -217,10 +217,10 @@ export function apply(ctx: Context, config: Config): void {
   /* ── B · 表层检索组 ── */
   reg({
     name: 'search_web',
-    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Brave / Bing 免费 + 可选 Tavily/Serper API），聚合去重，并回报**逐通道读数**（channels：谁出结果、谁空手、为什么空手）。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
+    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Bing 免费 + 可选 Tavily/Serper API；**brave 实测 100% HTTP 429 已移出默认组**），聚合去重，并回报**逐通道读数**（channels：谁出结果、谁空手、为什么空手）。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
     parameters: {
       query: { type: 'string', required: true, description: '搜索词' },
-      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 parallel+searxng+duckduckgo+brave）' },
+      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 parallel+searxng+duckduckgo+bing；brave 已移出默认组）' },
       lang: { type: 'string', description: '语言提示' },
       pages: { type: 'number', description: '翻页深度 1-3（默认 1）' },
       objective: { type: 'string', description: 'Parallel：自然语言说明「要找什么」（缺省＝query）' },
