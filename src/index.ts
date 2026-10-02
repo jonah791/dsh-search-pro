@@ -80,6 +80,9 @@ const channelsSchema = (): any => ({
       count: { type: 'number' },
       ms: { type: 'number' },
       via: { type: 'string' },
+      // 就绪门逐步判决（searxng 专用）：`probe-direct=ok@12ms ; boot-vm=ok@820ms ; ...`
+      // 2026-10-02 修：此前 schema 不列此字段，即便上游传了也会被 output 校验剥掉。
+      attempts: { type: 'string' },
       error: { type: 'string' },
     },
   },

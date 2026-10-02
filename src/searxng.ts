@@ -183,6 +183,17 @@ export function searxngDiagnostics(raw: string): { count: number; unresponsive: 
 /**
  * 保活命令（纯函数）：**幂等**——已有同标记进程就不再起第二个。
  * 用一个不常见的秒数当标记，避免与别的 `sleep` 撞车；`nohup … &` 让 wsl.exe 立刻退出而进程留在 distro 里。
+ *
+ * ⚠ **2026-10-02 实测：本函数达不到目的**（尸体测试双路皆负）——
+ *   `bash -lc "nohup sleep N &"` 与 `setsid sleep N &` 在 `wsl.exe -d Ubuntu -- …` 返回后
+ *   **进程都被带走**（紧接着 `pgrep` 即查不到）。根因：WSL 的 distro 会话在最后一个前台进程退出时结束，
+ *   未注册为服务的后台进程随会话消失。
+ *   而**要防的东西是真的**：同批实测 `uptime` 显示 **VM 刚启动 0 分钟** ⇒ WSL2 确实会空闲关 VM，
+ *   容器随之停、下次调用冷启 VM（10–20s 启动窗口内探测必失败）。
+ *   ⇒ 正确修法是**配置级**（`/mnt/c/Users/tr/.wslconfig` 的 `[wsl2] vmIdleTimeout`，需 `wsl --shutdown` 生效），
+ *     或把保活注册成 **systemd unit**（本机 PID 1 已是 systemd）。**留在代码里只为幂等语义，不解决冷启。**
+ * @param minutes - 保活时长（分钟）
+ * @returns 幂等的 shell 片段
  */
 export function keepAliveCmd(minutes: number): string {
   const secs = Math.max(60, Math.round(minutes * 60))
@@ -280,15 +291,32 @@ async function doEnsure(base: string, opts: EnsureOpts): Promise<EnsureState> {
   //    门却只会 `docker start` 一个已经在重启的容器 ⇒ 永远起不来。自愈用文档化的 down/up 组合，
   //    不用 `--force-recreate`——上一轮实测它留端口僵尸）。
   await step('container-health', async () => {
+    // 2026-10-02 改动（**保守版**）：改用 `docker ps -a` 看见已退出的容器，多区分一态：
+    //   `Up*`     → 在跑/正在启动 ⇒ 不动它（与原版同）
+    //   `Exited*` → **容器存在但已停** ⇒ 只 `up -d`（幂等 start），**不做破坏性 down**
+    //   `Restarting*` 或空 → 维持原版自愈 `down --remove-orphans; up -d`（2026-09-18 事故驱动：
+    //                        crash-loop 的容器不打破循环就永远起不来；既有测试 line 200 守住这条）
+    // 动机：原版用**不带 -a** 的 `docker ps`，看不见"存在但已停"这一态 ⇒ 一律走 down/up，
+    //       而 `down` 对已在容器是多余且破坏性的。
+    // ⚠ 曾一度把 `Restarting` 也改成"不打断"，但那**没有证据**（今天实测到的是 `Up 1 second`
+    //   反复刷新，而原版在 `Up` 时本就不打断）——按「修前证伪」回退该分支。
     const ps = await deps.run(
-      ['-d', 'Ubuntu', '--', 'bash', '-lc', "docker ps --filter name=alice-searxng --format '{{.Status}}'"],
+      ['-d', 'Ubuntu', '--', 'bash', '-lc', "docker ps -a --filter name=alice-searxng --format '{{.Status}}'"],
       30_000,
     )
     const status = ps.trim()
-    if (status.startsWith('Up')) return true
+    if (status.startsWith('Up')) return true // 在跑 / 正在启动 —— 别动它
+    const upOnly = 'cd /mnt/e/alice/.tools/searxng && docker compose up -d >/dev/null 2>&1 || true'
+    if (status.startsWith('Exited')) {
+      // 存在但已停 ⇒ 幂等 start（不销毁、不重建）
+      await deps.run(['-d', 'Ubuntu', '--', 'bash', '-lc', upOnly], 60_000)
+      return true
+    }
+    // Restarting（crash-loop）或容器不存在 ⇒ 文档化的 down/up 组合（不用 --force-recreate：
+    // 上一轮实测它留端口僵尸）
     await deps.run(
       ['-d', 'Ubuntu', '--', 'bash', '-lc',
-        'cd /mnt/e/alice/.tools/searxng && docker compose down --remove-orphans >/dev/null 2>&1; docker compose up -d >/dev/null 2>&1 || true'],
+        `cd /mnt/e/alice/.tools/searxng && docker compose down --remove-orphans >/dev/null 2>&1 || true; ${upOnly}`],
       60_000,
     )
     return true
@@ -307,14 +335,18 @@ async function doEnsure(base: string, opts: EnsureOpts): Promise<EnsureState> {
 
   if (ready) {
     readyCache = { base, atMs: now() }
-    const ka = opts.keepAliveMinutes ?? 120
-    if (ka > 0) {
-      // 有界保活：钉住 VM，避免搜索会话中途被空闲回收（失败只记一步，不影响本次查询）
-      void step('keep-alive', async () => {
-        await deps.run(['-d', 'Ubuntu', '--', 'bash', '-lc', keepAliveCmd(ka)], 20_000)
-        return true
-      })
-    }
+  }
+  // 保活**不再以「本次就绪」为条件**（2026-10-02 修）：
+  //   原版把 keep-alive 放在 `if (ready)` 内，而冷态首查要走 boot-vm +（必要时）down/up，
+  //   耗时 30–60s、远超 readyTimeoutMs(15s) ⇒ `ready` 必为 false ⇒ **保活永远下不去** ⇒ 下一次又冷启。
+  //   这是自我维持的**第二条**路径，也解释了 2026-10-02 实测「WSL 内 pgrep 查不到 sleep 保活进程」。
+  //   保活本身**幂等且无害**（keepAliveCmd 先 pgrep 命中就不重复下），故改为无条件尝试。
+  const ka = opts.keepAliveMinutes ?? 120
+  if (ka > 0) {
+    void step('keep-alive', async () => {
+      await deps.run(['-d', 'Ubuntu', '--', 'bash', '-lc', keepAliveCmd(ka)], 20_000)
+      return true
+    })
   }
   return { ready, via: ready ? 'wsl' : 'none', ms: now() - t0, attempts, cached: false }
 }

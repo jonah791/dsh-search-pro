@@ -232,12 +232,18 @@ export interface ChannelDigest {
   count: number
   ms?: number
   via?: string
+  /** 就绪门逐步判决（searxng 专用）：`probe-direct=ok ; boot-vm=ok ; poll-wsl=fail(...)`。 */
+  attempts?: string
   error?: string
 }
 
 /**
  * 通道读数提取（纯函数，**Q3/Q4 的 per-channel 版本**）：只认 `engine` 为非空字符串的项；
- * `count`/`ms` 非有限数设防；`error` 过 `redactText` + 截断 200（**与结果体的脱敏同一红线**）。
+ * `count`/`ms` 非有限数设防；`error`/`attempts` 过 `redactText` + 截断（**与结果体的脱敏同一红线**）。
+ *
+ * ⚠ 2026-10-02：`attempts`（就绪门逐步判决）此前**不在本函数的白名单里** ⇒ 即便上游一路传上来，
+ * 也会在这里被静默丢掉，通道读数里只剩 `ok:0@6744ms` 而看不出「断在哪一段」。
+ * **新增字段要贯通全链**：数据源 → 类型 → output schema → 本提取器 → 格式化器，漏一环即静默消失。
  */
 export function channelsOf(result: unknown): ChannelDigest[] {
   if (result === null || typeof result !== 'object') return []
@@ -253,12 +259,17 @@ export function channelsOf(result: unknown): ChannelDigest[] {
     const via = typeof r['via'] === 'string' && r['via'] !== '' ? r['via'] : undefined
     const error =
       typeof r['error'] === 'string' && r['error'] !== '' ? redactText(truncate(r['error'], 200)) : undefined
+    const attempts =
+      typeof r['attempts'] === 'string' && r['attempts'] !== ''
+        ? redactText(truncate(r['attempts'], 300))
+        : undefined
     out.push({
       engine: truncate(engine, 40),
       ok: r['ok'] !== false,
       count: typeof r['count'] === 'number' && Number.isFinite(r['count']) ? r['count'] : 0,
       ...(ms !== undefined ? { ms } : {}),
       ...(via !== undefined ? { via } : {}),
+      ...(attempts !== undefined ? { attempts } : {}),
       ...(error !== undefined ? { error } : {}),
     })
   }
@@ -270,7 +281,9 @@ export function formatChannels(list: ChannelDigest[], maxLen = 500): string {
   const text = list
     .map((c) => {
       const head = `${c.engine}=${c.ok ? 'ok' : 'fail'}:${c.count}${c.ms !== undefined ? `@${c.ms}ms` : ''}${c.via ? `/${c.via}` : ''}`
-      return c.error ? `${head}(${c.error})` : head
+      const withErr = c.error ? `${head}(${c.error})` : head
+      // 就绪门明细跟在方括号里（只对带它的通道出现，避免污染其余通道的可读性）
+      return c.attempts ? `${withErr}[${c.attempts}]` : withErr
     })
     .join(' ; ')
   return truncate(text, maxLen)

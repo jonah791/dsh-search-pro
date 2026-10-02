@@ -244,6 +244,64 @@ test('ensureSearxng: 容器 Up ⇒ 不自愈（不无谓重启）', async () => 
   assert.ok(!calls.some((c) => c.includes('docker compose')), 'Up 状态不该触发 compose')
 })
 
+test('ensureSearxng: 容器 Exited（存在但已停）⇒ 只 up -d，不做破坏性 down（2026-10-02 新增）', async () => {
+  resetSearxngState()
+  const calls = []
+  await ensureSearxng(BASE, {
+    now: () => 1000,
+    timeoutMs: 6_000,
+    keepAliveMinutes: 0,
+    deps: {
+      probe: async () => { throw new Error('ECONNREFUSED') },
+      probeWsl: (() => { let n = 0; return async () => { n++; if (n <= 2) throw new Error('curl: (7) Failed to connect'); return '{"results":[]}' } })(),
+      run: async (args) => {
+        const cmd = args.join(' ')
+        calls.push(cmd)
+        if (cmd.includes('--format')) return 'Exited (0) 3 minutes ago' // 存在但已停
+        return ''
+      },
+    },
+  })
+  const compose = calls.find((c) => c.includes('docker compose'))
+  assert.ok(compose, '应触发拉起')
+  assert.match(compose, /up -d/)
+  assert.ok(!compose.includes('down'), '已停的容器不得被 down（破坏性）—— 幂等 start 就够')
+})
+
+test('ensureSearxng: 容器根本不存在 ⇒ 走 down/up 组合（此时 down 无副作用）', async () => {
+  resetSearxngState()
+  const calls = []
+  await ensureSearxng(BASE, {
+    now: () => 1000,
+    timeoutMs: 6_000,
+    keepAliveMinutes: 0,
+    deps: {
+      probe: async () => { throw new Error('ECONNREFUSED') },
+      probeWsl: (() => { let n = 0; return async () => { n++; if (n <= 2) throw new Error('curl: (7) Failed to connect'); return '{"results":[]}' } })(),
+      run: async (args) => { calls.push(args.join(' ')); return '' }, // 永远空 = 容器不存在
+    },
+  })
+  const compose = calls.find((c) => c.includes('docker compose'))
+  assert.ok(compose, '应触发拉起')
+  assert.match(compose, /down --remove-orphans/)
+  assert.match(compose, /up -d/)
+})
+
+test('尸体样本：就绪门超时（ready=false）仍须下保活 —— 原版绑在 if(ready) 内 ⇒ 冷态首查永不留保活', async () => {
+  resetSearxngState()
+  const calls = []
+  let n = 0
+  const now = () => (n++ < 14 ? 1000 : 1_000_000)
+  const { deps } = makeDeps(Array.from({ length: 8 }, () => new Error('ECONNREFUSED')))
+  const st = await ensureSearxng(BASE, {
+    deps: { ...deps, run: async (args) => { calls.push(args.join(' ')); return '' } },
+    now, timeoutMs: 3_000, keepAliveMinutes: 60,
+  })
+  assert.equal(st.ready, false)
+  await new Promise((r) => setTimeout(r, 20))
+  assert.ok(calls.some((c) => c.includes('pgrep')), '超时也必须下保活——否则下一次又是一次冷启（自我维持）')
+})
+
 test('ensureSearxng: keepAliveMinutes=0 ⇒ 不得起保活进程', async () => {
   resetSearxngState()
   let clock = 1000

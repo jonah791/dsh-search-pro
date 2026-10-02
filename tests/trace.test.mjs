@@ -23,8 +23,10 @@ import {
   attemptsOf,
   buildStamp,
   channelOf,
+  channelsOf,
   composeSearchEntry,
   errorOf,
+  formatChannels,
   mtimeOf,
   paramsDigest,
   parseTraceEntries,
@@ -169,6 +171,35 @@ test('errorOf：抛错优先 / 结果 error / 无错 / 脱敏截断', () => {
   assert.equal(errorOf(undefined, 'plain'), '抛错: plain')
   assert.equal(errorOf({ error: 'auth Bearer sk-live-abcdefgh' }).includes('sk-live-abcdefgh'), false)
   assert.ok(errorOf({ error: 'x'.repeat(900) }).length <= 501)
+})
+
+test('channelsOf：逐通道提取（含 attempts 就绪门明细）——白名单漏字段即静默消失', () => {
+  const list = channelsOf({
+    channels: [
+      { engine: 'duckduckgo', ok: true, count: 10, ms: 1200 },
+      { engine: 'searxng', ok: true, count: 10, ms: 13180, via: 'direct', attempts: 'probe-direct=ok ; boot-vm=ok ; poll-wsl=ok' },
+      { engine: 'brave', ok: false, count: 0, ms: 440, error: 'HTTP 429' },
+      null,
+      { engine: '' },
+    ],
+  })
+  assert.equal(list.length, 3, '非对象项与空 engine 项应被跳过')
+  assert.equal(
+    list[1].attempts,
+    'probe-direct=ok ; boot-vm=ok ; poll-wsl=ok',
+    'attempts 必须贯通——2026-10-02 修：此前不在本函数的白名单里，一路传上来也会被静默丢掉',
+  )
+  assert.equal(list[0].attempts, undefined, '没这个字段的通道不得被塞空值')
+})
+
+test('formatChannels：attempts 渲染进方括号；无 attempts 的通道**不得**出现空 []', () => {
+  const text = formatChannels([
+    { engine: 'duckduckgo', ok: true, count: 10, ms: 1200 },
+    { engine: 'searxng', ok: false, count: 0, ms: 6744, via: 'none', attempts: 'probe-direct=fail ; poll-wsl=fail', error: '0 条' },
+  ])
+  assert.match(text, /duckduckgo=ok:10@1200ms/)
+  assert.ok(!text.includes('[]'), '无 attempts 的通道不得渲染空方括号——恒亮即噪音')
+  assert.match(text, /searxng=fail:0@6744ms\/none\(0 条\)\[probe-direct=fail ; poll-wsl=fail\]/)
 })
 
 test('composeSearchEntry：五问合成（驱动真实合成函数）', () => {

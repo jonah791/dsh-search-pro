@@ -374,7 +374,7 @@ export async function searchWeb(args: SearchWebArgs, sink?: ChannelSink): Promis
   const runChannel = (
     engine: string,
     fn: () => Promise<SearchResult[]>,
-    o: { budgetMs?: number; extra?: () => { via?: string; error?: string } } = {},
+    o: { budgetMs?: number; extra?: () => { via?: string; attempts?: string; error?: string } } = {},
   ): Promise<SearchResult[]> => {
     const t = Date.now()
     let reported = false
@@ -388,6 +388,7 @@ export async function searchWeb(args: SearchWebArgs, sink?: ChannelSink): Promis
         count: s.count,
         ms: Date.now() - t,
         ...(extra.via !== undefined ? { via: extra.via } : {}),
+        ...(extra.attempts !== undefined ? { attempts: extra.attempts } : {}),
         ...(s.error !== undefined ? { error: s.error } : extra.error !== undefined ? { error: extra.error } : {}),
       })
     }
@@ -410,14 +411,18 @@ export async function searchWeb(args: SearchWebArgs, sink?: ChannelSink): Promis
     ])
   }
 
-  const sxDiag: { via?: string; error?: string } = {}
+  const sxDiag: { via?: string; attempts?: string; error?: string } = {}
   const sxExtra = () => sxDiag
   const sxOpts = {
     gate: args.searxngGate,
     readyTimeoutMs: args.searxngReadyTimeoutMs,
     keepAliveMinutes: args.searxngKeepAliveMinutes,
-    onDiag: (d: { via: string; error?: string }) => {
+    // `attempts` 是**就绪门逐步判决**（probe-direct/probe-wsl/boot-vm/container-health/poll-wsl 各自 ok+ms），
+    // 2026-10-02 修：此前这里只声明 {via, error} ⇒ searchSearxng 传上来的 attempts **被这层窄化丢掉**，
+    // 通道读数里只剩「ok:0@6744ms」而看不出「断在哪一段」，我被迫靠 docker inspect 反推根因。
+    onDiag: (d: { via: string; ms?: number; attempts?: string; error?: string }) => {
       sxDiag.via = d.via
+      if (d.attempts) sxDiag.attempts = d.attempts
       if (d.error) sxDiag.error = d.error
     },
   }
