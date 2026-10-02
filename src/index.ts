@@ -21,7 +21,7 @@ import { searchCode, searchDarkweb, checkPasswordLeak } from './osint.js'
 import { fetchRobust } from './robust.js'
 import { fileURLToPath } from 'node:url'
 import {
-  buildStamp, composeSearchEntry, readPackageVersion, searchTrace,
+  buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
 } from './trace.js'
 import { SearchStore } from './store.js'
 
@@ -100,10 +100,16 @@ const resultsSchema = (extra: Record<string, unknown> = {}): any => ({
 
 // 注意：dsh-tools 的 render 签名是 (args, value) => content——第一个参数是执行参数，第二个才是 execute 返回值！
 function renderList(_a: any, v: any): any[] {
-  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  // 通道读数附注（2026-10-02 基线研究驱动）：`channels[]` 一直在返回值里，但 render 只渲染
+  // `results` ⇒ 模型看不到「谁空手、为什么空手」，只能从结果条数反推（曾据此误判 searxng 是否恢复）。
+  // 复用 trace.ts 的 channelsOf/formatChannels——脱敏与截断在同一真源，不另起一套格式化。
+  const channels = channelsOf(v)
+  const channelLine = channels.length === 0 ? '' : '\n\n通道读数：' + formatChannels(channels, 400)
+  if (!v.ok) return [{ type: 'text', text: (v.error ?? '失败') + channelLine }]
   const rs = v.results ?? []
-  if (rs.length === 0) return [{ type: 'text', text: v.note ?? '无结果' }]
-  return [{ type: 'text', text: rs.map((r: any, i: number) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet ?? ''}`.trimEnd()).join('\n') }]
+  if (rs.length === 0) return [{ type: 'text', text: (v.note ?? '无结果') + channelLine }]
+  const body = rs.map((r: any, i: number) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet ?? ''}`.trimEnd()).join('\n')
+  return [{ type: 'text', text: body + channelLine }]
 }
 
 function renderContent(_a: any, v: any): any[] {
