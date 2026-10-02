@@ -54,3 +54,24 @@ test('临时 profile 清理路径必须存在（防止修复被无意回退）',
   assert.match(src, /import\s*\{\s*rmSync\s*\}\s*from\s*'node:fs'/, '必须静态导入 rmSync')
   assert.match(src, /rmSync\(userData,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/, '必须清理 userData')
 })
+
+/**
+ * Bing 端点必须停在 cn 域（回归测试 · 尸体测试）。
+ *
+ * 已证实的缺陷（2026-10-02）：`https://www.bing.com/search` 对本机出口返回**日文语境**的
+ * 结果——中英文共 5 个查询 × 各 2 轮实测（同 httpGet / 同 header / 串行）：
+ *   假名标题 5–8/10；中文查询里中文源 0/10；英文查询 #1 也落在日文站（Qiita 等）。
+ * 改用 `https://cn.bing.com/search` 后：假名 0，五个查询的 #1 恒为最权威源
+ * （python.org / kubernetes.io / 百度百科 / gov.cn），且两轮逐字稳定。
+ * 已证伪的替代修法：在 www 上加 `mkt=zh-CN&setlang=zh-Hans` 既不改变语言，
+ * 三轮还返回**与查询无关**的页面（百度知道 / 微软蓝牙 / 知乎年金）。
+ */
+test('bing 端点必须是 cn.bing.com（防止日文语境回退）', () => {
+  const src = readFileSync(join(root, 'src', 'engines.ts'), 'utf8')
+  const m = src.match(/export async function searchBing[\s\S]*?\n\}/)
+  assert.ok(m, '未找到 searchBing 函数体——端点守卫失效，请核对函数名')
+  const body = m[0]
+  assert.match(body, /https:\/\/cn\.bing\.com\/search/, 'searchBing 必须请求 cn.bing.com')
+  assert.doesNotMatch(body, /www\.bing\.com\/search/, 'searchBing 不得回退到 www.bing.com')
+  assert.doesNotMatch(body, /mkt=|setlang=/, 'mkt/setlang 实测无效且污染结果，不得重新引入')
+})

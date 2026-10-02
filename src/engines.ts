@@ -87,9 +87,19 @@ export async function searchDuckDuckGo(query: string, maxResults = 10, opts: { t
   return last
 }
 
-/** Bing 网页抓取（免费，无需 key） */
+/**
+ * Bing 网页抓取（免费，无需 key）。
+ *
+ * 端点用 cn.bing.com 而非 www.bing.com —— 后者对本机出口返回**日文语境**的结果。
+ * 2026-10-02 实测（中英文共 5 个查询 × 各 2 轮，同 httpGet 同 header 串行）：
+ *   www：假名标题 5–8/10，中文查询里中文源 0/10，英文查询 #1 也落在日文站（Qiita 等）
+ *   cn ：假名 0，五个查询的 #1 恒为最权威源（python.org / kubernetes.io / 百度百科 / gov.cn）
+ * 试过的无效修法：www 上加 `mkt=zh-CN&setlang=zh-Hans` 不改变语言，
+ * 且三轮返回**与查询无关**的页面（百度知道 / 微软蓝牙 / 知乎年金）⇒ 已证伪，勿再加。
+ * 附带：cn 域返回直接 URL，不经 /ck/a 包装 —— resolveBingRedirects 在此为空转保险。
+ */
 export async function searchBing(query: string, maxResults = 10): Promise<SearchResult[]> {
-  const html = await httpGet(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults + 5}`)
+  const html = await httpGet(`https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults + 5}`)
   const out: SearchResult[] = []
   const blocks = html.split(/<li class="b_algo"/i)
   for (const b of blocks.slice(1)) {
