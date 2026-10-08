@@ -9,9 +9,7 @@
 
 ## 1 · 定位与反定位
 
-**定位**：给我一套「检索 + 抓取」工具面（**24 个** `search_*` / `fetch_*` / `archive_*` / `lookup_*` / `enum_*` 工具），
-覆盖三层——L1 表层多引擎（**含 2026-09-18 新增的无钥匙 `parallel` 与自托管 `searxng`**）、L2 深网与 OSINT、L3 Tor/反爬抓取——
-并统一输出外壳 `{ ok, count, results, error?, note? }`；**`search_deep`（2026-09-18）**在其上提供「一句话交付带引用报告」的深研循环。
+**定位**：给我一套「检索 + 抓取」工具面（**24 个** `search_*` / `fetch_*` / `archive_*` / `lookup_*` / `enum_*` 工具）， 覆盖三层——L1 表层多引擎（**含 2026-09-18 新增的无钥匙 `parallel` 与自托管 `searxng`**）、L2 深网与 OSINT、L3 Tor/反爬抓取—— 并统一输出外壳 `{ ok, count, results, error?, note? }`；**`search_deep`（2026-09-18）**在其上提供「一句话交付带引用报告」的深研循环。
 
 
 **反定位（本文不管什么）**：
@@ -97,6 +95,7 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 ### 4.4 自证轨迹契约（`<DSH_HOME>/search-trace.jsonl`）`[MUST]`
 
 **动机**：本插件有 **23 个工具**，而每次调用的真实经过（走了哪个引擎 / **反爬通道链走到哪一级** / 聚合去重后剩多少条 / 耗时 / 断在哪一段）此前**只写 `ctx.logger`**，宿主 logger **不落盘**。
+
 代价已实测：headless 清理缺陷泄漏 ~180MB **而日志全干净**（§9）——「降级到哪一级、哪一级失败了」当时完全不可见。
 
 - **落盘路径**：`<DSH_HOME>/search-trace.jsonl`（`DSH_HOME` 环境变量优先，缺省 `<homedir>/.dsh`；
