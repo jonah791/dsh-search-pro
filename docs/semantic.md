@@ -96,8 +96,7 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 
 ### 4.4 自证轨迹契约（`<DSH_HOME>/search-trace.jsonl`）`[MUST]`
 
-**动机**：本插件有 **23 个工具**，而每次调用的真实经过（走了哪个引擎 / **反爬通道链走到哪一级** /
-聚合去重后剩多少条 / 耗时 / 断在哪一段）此前**只写 `ctx.logger`**，宿主 logger **不落盘**。
+**动机**：本插件有 **23 个工具**，而每次调用的真实经过（走了哪个引擎 / **反爬通道链走到哪一级** / 聚合去重后剩多少条 / 耗时 / 断在哪一段）此前**只写 `ctx.logger`**，宿主 logger **不落盘**。
 代价已实测：headless 清理缺陷泄漏 ~180MB **而日志全干净**（§9）——「降级到哪一级、哪一级失败了」当时完全不可见。
 
 - **落盘路径**：`<DSH_HOME>/search-trace.jsonl`（`DSH_HOME` 环境变量优先，缺省 `<homedir>/.dsh`；
@@ -184,7 +183,8 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A27 | **通道「0 条」有现场快照可查**（不猜判据，先让现象自证） | DDG 三次全 0 条 / parallel 四处静默 `return []` 任一发生 ⇒ 追加一行到 `<DSH_HOME>/search-channel-diag.jsonl`（`engine/shape/query/elapsedMs/features`）；`npm test` → `tests/channel-diag.test.mjs` **14 例**（DDG 五形状 + parallel 四形状各一份**尸体样本** + 显式 home 优先 + 不可写返回 false 且不抛） | **离线已实测**；**线上待现场触发**（需真实 0 条发生） |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
-**回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（当前 HEAD `b5c5a20`）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。
+
+**回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（<commit> 用 `git -C self-plugins/dsh-search-pro log --oneline -1` 取当前 HEAD）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。
 
 ## 8 · 与实现的关系
 
