@@ -17,11 +17,28 @@ import { appendChannelDiag, channelDiagPath, classifyDdgZero, classifyParallelZe
 
 // ───────────────────────── DDG：五种形状的尸体样本 ─────────────────────────
 
-test('ddg · 反爬页 ⇒ anomaly（不是「查询没结果」）', () => {
-  const html = '<html><head><title>DuckDuckGo</title></head><body>Unfortunately, bots use DuckDuckGo too. unusual traffic</body></html>'
+test('ddg · 反爬页（**真实标记** · 2026-10-08 现场标定）⇒ anomaly', () => {
+  // 样本取自真实现场：把 DDG 打到风控后取回的页面结构（见 src/channelDiag.ts 的 DDG_ANOMALY_STRONG_RE）
+  const html = [
+    '<html><head><title>DuckDuckGo</title></head><body>',
+    '<form id="img-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet&ti=1" method="POST"></form>',
+    '<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>',
+    '</body></html>',
+  ].join('')
   const { shape, features } = classifyDdgZero(html)
   assert.equal(shape, 'anomaly')
   assert.equal(features.anomaly, true)
+  assert.deepEqual(features.anomalyMarkers, ['anomaly.js', 'anomaly-modal', 'cc=botnet', 'bots-use-ddg'])
+})
+
+test('ddg · 只有泛化词命中 ⇒ **不**判 anomaly（弱信号只作旁证，防样板文本误报）', () => {
+  const html = '<html><head><title>DDG</title></head><body><div class="something">challenge accepted</div></body></html>'
+  const { shape, features } = classifyDdgZero(html)
+  assert.notEqual(shape, 'anomaly')
+  assert.equal(shape, 'no-blocks') // 落回「缺块」这类推断形状
+  assert.equal(features.anomaly, false)
+  assert.equal(features.anomalyHint, true) // 弱信号仍被记录，供人判读
+  assert.deepEqual(features.anomalyMarkers, [])
 })
 
 test('ddg · 真无结果页 ⇒ no-results-text（判据顺序：必须排在 no-blocks 之前）', () => {

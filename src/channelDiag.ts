@@ -44,14 +44,39 @@ export function channelDiagPath(home: string): string {
 }
 
 const DDG_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i
-const DDG_ANOMALY_RE = /anomaly|unusual traffic|challenge|are you a robot/i
+/** 弱信号：泛化词（可能命中页面样板文本，故只作 `anomaly-hint`）。 */
+const DDG_ANOMALY_HINT_RE = /anomaly|unusual traffic|challenge|are you a robot/i
+/**
+ * 强信号：反爬页的**结构性标记**（2026-10-08 由真实现场标定）。
+ *
+ * 实证来源（工单 t-6bee3fd0）：把 DDG 打到风控后取回原页，得到
+ * `<form id="img-form" action="//duckduckgo.com/anomaly.js?…&cc=botnet&…">`、
+ * `<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>`、
+ * `<title>DuckDuckGo</title>`、`len=14235`（正常页 32–35K）、`blocks=0`。
+ * ⇒ 这些标记出现时**无需推断**：这就是反爬页，不是「查询无结果」。
+ */
+const DDG_ANOMALY_STRONG_RE = /anomaly\.js|anomaly-modal|cc=botnet|bots use duckduckgo too/i
 const DDG_NORESULT_RE = /no\s+results|did not match|没有找到|找不到|未找到/i
+
+/** 从页面里抽出命中的**强标记**（用于现场快照的 `anomalyMarkers`，比布尔值可判读）。 */
+export function ddgAnomalyMarkers(html: string): string[] {
+  const out: string[] = []
+  const probes: Array<[string, RegExp]> = [
+    ['anomaly.js', /anomaly\.js/i],
+    ['anomaly-modal', /anomaly-modal/i],
+    ['cc=botnet', /cc=botnet/i],
+    ['bots-use-ddg', /bots use duckduckgo too/i],
+  ]
+  for (const [name, re] of probes) if (re.test(html)) out.push(name)
+  return out
+}
 
 /**
  * 分类 DDG「解析 0 条」的现场形状（纯函数）。
  *
  * 五种形状的**判别意义不同**，这是埋点存在的理由——只知道「0 条」修不了：
- * · `anomaly` 反爬/风控页 ⇒ 该重试或换出口（不是查询没结果）
+ * · `anomaly` **强标记**命中（`anomaly.js` / `anomaly-modal` / `cc=botnet` / bots-use-ddg）
+ *   ⇒ 反爬页，**不是「查询无结果」**（2026-10-08 由真实现场标定，见 `DDG_ANOMALY_STRONG_RE`）
  * · `no-results-text` 明确的「无结果」文案 ⇒ **真 0 结果**（此时记 ok:0 是诚实的）
  * · `no-blocks` 连结果块都没有、也没有无结果文案 ⇒ 页面结构变了（选择器失效）
  * · `blocks-no-anchors` 有块无锚点 ⇒ 同上，但更局部（可能是版式微调）
@@ -59,6 +84,7 @@ const DDG_NORESULT_RE = /no\s+results|did not match|没有找到|找不到|未�
  *
  * ⚠ 判据顺序是**判据的一部分**：`no-results-text` 必须排在 `no-blocks` 之前——
  * 真无结果页本来就没有结果块，后置会把它误判成「结构变了」，两者修法完全不同。
+ * `anomaly` 排在最前：它是唯一有**结构性证据**的形状，其余都靠「缺什么」推断。
  *
  * @param parsed 调用方解析器实际得到的条数（未传 = -1 = 无法判 `all-ads-filtered`）。
  */
@@ -66,17 +92,22 @@ export function classifyDdgZero(html: string, parsed = -1): { shape: string; fea
   const blocks = html.split(/<div[^>]*class="[^"]*result[^"]*"/i).length - 1
   const resultA = (html.match(/class="result__a"/gi) ?? []).length
   const title = (html.match(DDG_TITLE_RE)?.[1] ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+  const anomalyMarkers = ddgAnomalyMarkers(html)
   const features: Record<string, unknown> = {
     len: html.length,
     blocks,
     resultA,
     parsed,
     title,
-    anomaly: DDG_ANOMALY_RE.test(html),
+    anomaly: anomalyMarkers.length > 0,
+    /** 命中的**强标记**清单（可判读，比布尔值有用）。 */
+    anomalyMarkers,
+    /** 泛化词的弱信号（可能命中页面样板文本；只作旁证，不单独判形状）。 */
+    anomalyHint: DDG_ANOMALY_HINT_RE.test(html),
     noResultsText: DDG_NORESULT_RE.test(html),
   }
   let shape = 'unknown'
-  if (features.anomaly === true) shape = 'anomaly'
+  if (anomalyMarkers.length > 0) shape = 'anomaly'
   else if (features.noResultsText === true) shape = 'no-results-text'
   else if (blocks === 0) shape = 'no-blocks'
   else if (resultA === 0) shape = 'blocks-no-anchors'

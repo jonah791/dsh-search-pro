@@ -179,7 +179,7 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A24 | **逐通道读数可读**（`channels[]`：谁出结果 / 谁空手 / 为什么） | 工具结果与 `search-trace.jsonl` 共用同一读数：`channels` 字段形如 `searxng=ok:20@1832ms/direct ; brave=fail:0@900ms(too many requests)`；`npm test` → `channelsOf/formatChannels/composeSearchEntry`（含脱敏 + 键位固定断言）| **已实测** |
 | A25 | **领域路由：代码类问题自动带 GitHub、研究类带学术三源** | `search_deep` 报告的「领域路由」行 + 工具参数 `routing=off` 可关；`npm test` → `tests/routing.test.mjs` 5 例（中英双命中/退化输入）| **已实测** |
 | A26 | **多引擎交叉验证标记** | `search_deep` 报告每条来源标 `★多引擎一致`（≥2 条通道独立命中同一 URL），并在汇总行给 `多引擎一致 N 条` | **已实测** |
-| A27 | **通道「0 条」有现场快照可查**（不猜判据，先让现象自证） | DDG 三次全 0 条 / parallel 四处静默 `return []` 任一发生 ⇒ 追加一行到 `<DSH_HOME>/search-channel-diag.jsonl`（`engine/shape/query/elapsedMs/features`）；`npm test` → `tests/channel-diag.test.mjs` **14 例**（DDG 五形状 + parallel 四形状各一份**尸体样本** + 显式 home 优先 + 不可写返回 false 且不抛） | **离线已实测**；**线上待现场触发**（需真实 0 条发生） |
+| A27 | **通道「0 条」有现场快照可查**（不猜判据，先让现象自证） | DDG 三次全 0 条 / parallel 四处静默 `return []` 任一发生 ⇒ 追加一行到 `<DSH_HOME>/search-channel-diag.jsonl`（`engine/shape/query/elapsedMs/features`）；`npm test` → `tests/channel-diag.test.mjs` **15 例**（DDG 五形状 + parallel 四形状各一份**尸体样本** + 显式 home 优先 + 不可写返回 false 且不抛 + 「仅泛化词不判 anomaly」精确性）；**线上触发实测（2026-10-08 08:34）**：`duckduckgo=ok:0@8739ms` ⇒ 侧车 1 行 `shape=anomaly`、`len=14235`、`blocks=0`，并已取回原页确认是反爬页（`cc=botnet` / `anomaly-modal`） | **已实测**（离线 15/15 + 线上现场 1 行 + 原页地面真相） |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 
@@ -201,8 +201,12 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
   - **语义被补充（判据顺序是判据的一部分）**：`no-results-text` 必须判在 `no-blocks` **之前**——真无结果页本来就没有结果块，后置会把它误判成「结构变了（选择器失效）」，而两者修法完全不同。另补 `all-ads-filtered`：`out` 为空而锚点数 >0 ⇒ 全被判为广告，不是没有结果。
   - **语义被补充（parallel 有三处静默 `return []`）**：① 响应无 `content[0].text` 节点 ② `text` 不是 JSON ③ `results` 为空或全被 `.filter(r => r.url)` 滤掉。②最可疑：请求头带 `accept: text/event-stream`，若服务端回 SSE（`data: {...}` 行）则 `JSON.parse` 必抛 ⇒ 秒回 `ok:0`——`textHead` 就是判这条的现场证据。
   - **⚠ 本次被测试抓出的真缺陷（夹具碰生产）**：`appendChannelDiag` 初版写 `resolveHome(opts.env ?? process.env, opts.home)` —— `resolveHome` 的**第一个参数（env）优先**，于是单元测试传入的临时目录被环境里的 `DSH_HOME` 盖掉，**测试数据写进了生产侧车**（实测 2 行）。修法：`opts.home ?? resolveHome(...)`（显式路径 > 环境推导，与本插件 `searchTrace` 的既有约定一致），并补一条专门的回归测试「显式 home 优先于环境变量」。**教训：优先级不是细节——它决定夹具会不会碰生产。**
-  - **本步不改行为**：0 条仍返回 `[]`。「0 条且判为非结果页 ⇒ 抛错」是判据成型后的下一步。
-  - **验收与回归**：`node --test tests/channel-diag.test.mjs` → **14/14**（DDG 五形状 + parallel 四形状各一份尸体样本 + 写盘/截断/显式优先/不可写不抛）；全量 `node --test tests/*.test.mjs` → **90/90**；`tsc` 干净。
+  - **本步不改行为**：0 条仍返回 `[]`。「0 条且判为非结果页 ⇒ 抛错」是判据成型后的下一步，且**行为变更前必须先做 call-site 审计**——`deep.ts:94` 与 `research.ts` 也直接调 `searchDuckDuckGo`，改成抛错要确认它们不会因此整体失败（这是本轮**未做**的检查）。
+  - **✅ 现场标定成功（2026-10-08 08:34 · 正对照）**：用一个必然无结果的查询（`site:zzq-nonexistent-domain-12345.example hello world`，单通道 ddg）触发 ⇒ 读数 `duckduckgo=ok:0@8739ms`、工具显示「无结果」、侧车**首次写入 1 行**：`{"engine":"duckduckgo","shape":"anomaly","elapsedMs":8726,"features":{"len":14235,"blocks":0,"resultA":0,"parsed":0,"title":"DuckDuckGo","anomaly":true,"noResultsText":false}}`。
+  - **把原页取回确认（不再推断）**：`fetch_page … mode=raw` 取同一 URL，页面里含 `action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet&…"`、`<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>`、`Select all squares containing a duck:` ⇒ **这是反爬/CAPTCHA 页，不是「查询无结果」**，分类器的 `anomaly` 判定正确。
+  - **判据据此加固（强标记 > 弱信号）**：新增 `DDG_ANOMALY_STRONG_RE`（`anomaly.js` / `anomaly-modal` / `cc=botnet` / `bots use duckduckgo too`）作为 `anomaly` 的**唯一充分条件**；原泛化正则降级为 `anomalyHint`（只记录、不判形状，防页面样板文本误报）；现场快照额外记 `anomalyMarkers[]`（可判读的标记清单）。**实测判别量**：反爬页 `len≈14.2K` vs 正常页 `32–35K`、`blocks=0`、标题泛化为 `DuckDuckGo`（正常页是「‹query› at DuckDuckGo」）。
+  - **诚实边界**：这次是**我自己连续请求把 DDG 打到风控**后触发的（同一分钟前的负对照仍是 `ok:10@1654ms`）⇒ 它证明了「反爬页长什么样 + 埋点能否抓到」，**不等于**基线那两次 `ok:0` 的因果已证实（那两次 5.3/5.6 s，本次 8.7 s）；形状一致（短页/无块）的可能性高，但要靠自然复现或更多样本收敛。
+  - **验收与回归**：`node --test tests/channel-diag.test.mjs` → **15/15**（含**真实标记**样本 + 一条精确性测试「仅泛化词命中**不**判 anomaly」）；全量 `node --test tests/*.test.mjs` → **91/91**；`tsc` 干净。
 
 - **2026-09-18（第二轮）· U10 闭环 + 逐通道读数 + 领域路由（测试 40→69）**
   - **U10 的最终定性，把我前两轮的判词都推翻了**：既不是「绑定地址不对」，也不是「Windows↔WSL 可达性间歇」。真因两条叠加——
