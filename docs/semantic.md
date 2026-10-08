@@ -181,18 +181,29 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A24 | **逐通道读数可读**（`channels[]`：谁出结果 / 谁空手 / 为什么） | 工具结果与 `search-trace.jsonl` 共用同一读数：`channels` 字段形如 `searxng=ok:20@1832ms/direct ; brave=fail:0@900ms(too many requests)`；`npm test` → `channelsOf/formatChannels/composeSearchEntry`（含脱敏 + 键位固定断言）| **已实测** |
 | A25 | **领域路由：代码类问题自动带 GitHub、研究类带学术三源** | `search_deep` 报告的「领域路由」行 + 工具参数 `routing=off` 可关；`npm test` → `tests/routing.test.mjs` 5 例（中英双命中/退化输入）| **已实测** |
 | A26 | **多引擎交叉验证标记** | `search_deep` 报告每条来源标 `★多引擎一致`（≥2 条通道独立命中同一 URL），并在汇总行给 `多引擎一致 N 条` | **已实测** |
+| A27 | **通道「0 条」有现场快照可查**（不猜判据，先让现象自证） | DDG 三次全 0 条 / parallel 四处静默 `return []` 任一发生 ⇒ 追加一行到 `<DSH_HOME>/search-channel-diag.jsonl`（`engine/shape/query/elapsedMs/features`）；`npm test` → `tests/channel-diag.test.mjs` **14 例**（DDG 五形状 + parallel 四形状各一份**尸体样本** + 显式 home 优先 + 不可写返回 false 且不抛） | **离线已实测**；**线上待现场触发**（需真实 0 条发生） |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 **回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（当前 HEAD `b5c5a20`）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。
 
 ## 8 · 与实现的关系
 
-- **主实现与模块职责**：`src/index.ts`（装配 + **24** 工具 + 渲染器 `renderList/renderContent/renderShare`）；`engines.ts` 多引擎与聚合（含**逐通道读数** `ChannelStat`）｜**`searxng.ts` 就绪门**（`ensureSearxng`/`wslRun`/`searxngSearchUrl`/`parseSearxngResults`/`searxngDiagnostics`/`keepAliveCmd`，2026-09-18 第二轮新增，U10 闭环）｜`research.ts` 深研循环（含**领域路由** `routeIntents` 与多引擎交叉验证标记）｜`deep.ts` 学术/专利/GitHub/社区/WHOIS/子域/DNS/Shodan｜`robust.ts` 四通道反爬 + `detectChallenge`｜`share.ts` 网盘 + 磁力三源｜`osint.ts` Sourcegraph/Ahmia/HIBP｜`archive.ts` Wayback CDX/还原/archive.today｜`fetch.ts` Jina→自抓降级 + Tor｜`buildQuery.ts` 查询改写｜`store.ts` 内存缓存/配额｜`util.ts` HTTP/HTML/URL/去重｜**`trace.ts` 自证轨迹层**（`resolveHome`/`paramsDigest`/`resultCount`/`resultOk`/`channelOf`/`attemptsOf`/**`channelsOf`/`formatChannels`**/`errorOf`/**`composeSearchEntry`**（合成单一真源）+ 薄 IO）。
-- **测试**：`tests/util.test.mjs`（20）+ `tests/esm-contract.test.mjs` + `tests/trace.test.mjs`（20）+ **`tests/searxng.test.mjs`（24：就绪门四态/单飞/预算耗尽/保活/Restarting 自愈 + `simplifyQuery` + trace `channels`）** + **`tests/routing.test.mjs`（5）** = **69 例**，`npm test` 一条命令复跑。
+- **主实现与模块职责**：`src/index.ts`（装配 + **24** 工具 + 渲染器 `renderList/renderContent/renderShare`）；`engines.ts` 多引擎与聚合（含**逐通道读数** `ChannelStat`）｜**`searxng.ts` 就绪门**（`ensureSearxng`/`wslRun`/`searxngSearchUrl`/`parseSearxngResults`/`searxngDiagnostics`/`keepAliveCmd`，2026-09-18 第二轮新增，U10 闭环）｜`research.ts` 深研循环（含**领域路由** `routeIntents` 与多引擎交叉验证标记）｜`deep.ts` 学术/专利/GitHub/社区/WHOIS/子域/DNS/Shodan｜`robust.ts` 四通道反爬 + `detectChallenge`｜`share.ts` 网盘 + 磁力三源｜`osint.ts` Sourcegraph/Ahmia/HIBP｜`archive.ts` Wayback CDX/还原/archive.today｜`fetch.ts` Jina→自抓降级 + Tor｜`buildQuery.ts` 查询改写｜`store.ts` 内存缓存/配额｜`util.ts` HTTP/HTML/URL/去重｜**`trace.ts` 自证轨迹层**（`resolveHome`/`paramsDigest`/`resultCount`/`resultOk`/`channelOf`/`attemptsOf`/**`channelsOf`/`formatChannels`**/`errorOf`/**`composeSearchEntry`**（合成单一真源）+ 薄 IO）｜**`channelDiag.ts` 通道 0 条现场快照**（`classifyDdgZero`/`classifyParallelZero` 纯分类 + `appendChannelDiag` 吞错追加；2026-10-08）。
+- **测试**：`tests/util.test.mjs`（20）+ `tests/esm-contract.test.mjs` + `tests/trace.test.mjs`（20）+ **`tests/searxng.test.mjs`（24：就绪门四态/单飞/预算耗尽/保活/Restarting 自愈 + `simplifyQuery` + trace `channels`）** + **`tests/routing.test.mjs`（5）** + **`tests/channel-diag.test.mjs`（14）** = **90 例**（2026-10-08 现算；早前记的 69 是 09-18 快照），`npm test` 一条命令复跑。
 - **同语义副本**：无（无跨仓平行语义）。
 - **未实现/未验证**：`archive.ts:archiveTodayLookup` **已实现但未接入任何工具**（死代码）；README 提到的 SearXNG 增强**未实现**；`community` 的 `tieba` 平台仅在类型里（`CommunityPlatform`），`COMMUNITY_PLATFORMS` 与工具 enum 均只含 `reddit/hn/4chan`。
 
 ## 9 · 实践修订记录
+
+- **2026-10-08 · 通道「0 条」现场快照（诊断埋点 · 工单 t-6bee3fd0 第 1 步）**
+  - **动机（读数缺陷）**：基线 v2 里出现过 `duckduckgo=ok:0`（两题，~5.3s）与 `parallel=ok:0`（两题，**~1000ms 秒回**，而成功态是 1099–7778ms）。两者都是**拿不到结果却记为「成功但空」**：DDG 三次尝试全解析 0 条后 `return last`（`[]`），`runChannel` 据此记 `ok:true, count:0` ⇒ 通道可靠性被高估，5.3s 的失败成本不可见。
+  - **为什么不直接改行为**：异常页的现场特征**未捕获**（9/9 次复现全部正常：`len` 32–35K、`blocks=42`、`result__a=true`、无 anomaly/challenge 词）。判据必须是实测而非推断（本轮 bing 的两次试错已印证）⇒ **先埋点让现象自证**，等现场样本到齐再写判据、再改读数语义。
+  - **新增能力**：`src/channelDiag.ts` —— `classifyDdgZero(html, parsed)`（**五种形状**：`anomaly` / `no-results-text` / `no-blocks` / `blocks-no-anchors` / `all-ads-filtered`）+ `classifyParallelZero(input)`（**四种形状**：`no-text-node` / `text-not-json` / `empty-results` / `all-filtered`）+ `appendChannelDiag`（追加一行到 `<DSH_HOME>/search-channel-diag.jsonl`，**失败即吞并返回 false**）。
+  - **语义被补充（判据顺序是判据的一部分）**：`no-results-text` 必须判在 `no-blocks` **之前**——真无结果页本来就没有结果块，后置会把它误判成「结构变了（选择器失效）」，而两者修法完全不同。另补 `all-ads-filtered`：`out` 为空而锚点数 >0 ⇒ 全被判为广告，不是没有结果。
+  - **语义被补充（parallel 有三处静默 `return []`）**：① 响应无 `content[0].text` 节点 ② `text` 不是 JSON ③ `results` 为空或全被 `.filter(r => r.url)` 滤掉。②最可疑：请求头带 `accept: text/event-stream`，若服务端回 SSE（`data: {...}` 行）则 `JSON.parse` 必抛 ⇒ 秒回 `ok:0`——`textHead` 就是判这条的现场证据。
+  - **⚠ 本次被测试抓出的真缺陷（夹具碰生产）**：`appendChannelDiag` 初版写 `resolveHome(opts.env ?? process.env, opts.home)` —— `resolveHome` 的**第一个参数（env）优先**，于是单元测试传入的临时目录被环境里的 `DSH_HOME` 盖掉，**测试数据写进了生产侧车**（实测 2 行）。修法：`opts.home ?? resolveHome(...)`（显式路径 > 环境推导，与本插件 `searchTrace` 的既有约定一致），并补一条专门的回归测试「显式 home 优先于环境变量」。**教训：优先级不是细节——它决定夹具会不会碰生产。**
+  - **本步不改行为**：0 条仍返回 `[]`。「0 条且判为非结果页 ⇒ 抛错」是判据成型后的下一步。
+  - **验收与回归**：`node --test tests/channel-diag.test.mjs` → **14/14**（DDG 五形状 + parallel 四形状各一份尸体样本 + 写盘/截断/显式优先/不可写不抛）；全量 `node --test tests/*.test.mjs` → **90/90**；`tsc` 干净。
 
 - **2026-09-18（第二轮）· U10 闭环 + 逐通道读数 + 领域路由（测试 40→69）**
   - **U10 的最终定性，把我前两轮的判词都推翻了**：既不是「绑定地址不对」，也不是「Windows↔WSL 可达性间歇」。真因两条叠加——

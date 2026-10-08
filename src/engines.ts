@@ -2,6 +2,7 @@
 
 import { httpGet, httpPostJSON, decodeDdgUrl, decodeBingUrl, stripTags, normalizeUrl, dedupe, sleep, UA } from './util.js'
 import { ensureSearxng, formatAttempts, parseSearxngResults, searxngDiagnostics, searxngSearchUrl, simplifyQuery, wslRun } from './searxng.js'
+import { appendChannelDiag, classifyDdgZero, classifyParallelZero } from './channelDiag.js'
 
 /** 单通道读数（Q3/Q4/Q5 的 per-channel 版本）——由 `searchWeb`/`searchSearxng` 汇给调用方与 trace。 */
 export interface ChannelStat {
@@ -42,7 +43,12 @@ export interface SearchResult {
  *  timeRange：DDG 时间过滤 df 参数——'w'/'m'/'y'（周/月/年）或 'YYYY-MM-DD..YYYY-MM-DD'（绝对区间）
  */
 export async function searchDuckDuckGo(query: string, maxResults = 10, opts: { timeRange?: string } = {}): Promise<SearchResult[]> {
+  const t0 = Date.now()
   let last: SearchResult[] = []
+  /** 最后一次尝试的原始页（0 条时落现场快照用；**只存引用，不解析两次**）。 */
+  let lastHtml = ''
+  /** 解析器**实际匹配到的锚点数**（广告过滤**前**）——用于区分「真 0 结果」与「全被过滤」。 */
+  let anchors = 0
   const timeParam = opts.timeRange ? `&df=${encodeURIComponent(opts.timeRange)}` : ''
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await new Promise((r) => setTimeout(r, 1500 * attempt))
@@ -61,12 +67,15 @@ export async function searchDuckDuckGo(query: string, maxResults = 10, opts: { t
         'Upgrade-Insecure-Requests': '1',
       }
       const html = await httpGet(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}${timeParam}`, { headers })
+      lastHtml = html
+      anchors = 0 // 每次尝试重新计数：快照要反映**最后一次**页面的解析结果
       const out: SearchResult[] = []
       // 结果块：<div class="result"> ... <a class="result__a" href>Title</a> ... <a class="result__snippet">
       const blocks = html.split(/<div[^>]*class="[^"]*result[^"]*"/i)
       for (const b of blocks.slice(1)) {
         const a = b.match(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
         if (!a?.[1]) continue
+        anchors++ // 广告过滤前计数（`out` 为空但这里 >0 ⇒ 全被过滤，见 all-ads-filtered）
         const url = normalizeUrl(decodeDdgUrl(a[1]))
         if (url.includes('duckduckgo.com/y.js') || url.includes('ad_domain')) continue // 过滤广告
         const sn = b.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i)?.[1] ?? ''
@@ -83,6 +92,13 @@ export async function searchDuckDuckGo(query: string, maxResults = 10, opts: { t
     } catch {
       /* 重试 */
     }
+  }
+  // 三次全 0 条 ⇒ 落一份**现场快照**（工单 t-6bee3fd0 第 1 步：不猜判据，先让现象自证）。
+  // ⚠ 此处只观测、**不改行为**：仍然返回 []。改读数语义（0 条且判为非结果页 ⇒ 抛错）
+  //   是判据成型后的下一步，等现场样本到齐再动。
+  if (last.length === 0) {
+    const { shape, features } = classifyDdgZero(lastHtml, anchors)
+    appendChannelDiag({ atMs: Date.now(), engine: 'duckduckgo', shape, query, elapsedMs: Date.now() - t0, features })
   }
   return last
 }
@@ -207,6 +223,7 @@ export async function searchParallel(
   maxResults = 10,
   opts: { objective?: string; sessionId?: string; extraQueries?: string[] } = {},
 ): Promise<SearchResult[]> {
+  const t0 = Date.now()
   const queries = [query, ...(opts.extraQueries ?? [])]
     .map((q) => String(q).trim())
     .filter(Boolean)
@@ -229,15 +246,33 @@ export async function searchParallel(
     { headers: { accept: 'application/json, text/event-stream' }, timeoutMs: 60000 },
   )
   const text = data?.result?.content?.[0]?.text
-  if (typeof text !== 'string') return []
+  /** 0 条 ⇒ 落现场快照。该通道有**三处静默 `return []`**，形状不同、修法不同（见 channelDiag.ts）。 */
+  const diagZero = (i: {
+    hasText: boolean
+    textLen: number
+    textHead: string
+    parseOk: boolean
+    resultsRaw: number
+    afterFilter: number
+  }) => {
+    const { shape, features } = classifyParallelZero(i)
+    appendChannelDiag({ atMs: Date.now(), engine: 'parallel', shape, query, elapsedMs: Date.now() - t0, features })
+  }
+  if (typeof text !== 'string') {
+    diagZero({ hasText: false, textLen: 0, textHead: '', parseOk: false, resultsRaw: 0, afterFilter: 0 })
+    return []
+  }
   let payload: any
   try {
     payload = JSON.parse(text)
   } catch {
+    // 最可疑的形状：请求头带 `accept: text/event-stream`，若服务端回 SSE（`data: {...}` 行）
+    // ⇒ `JSON.parse` 必抛 ⇒ 秒回 ok:0。`textHead` 就是判这条的现场证据。
+    diagZero({ hasText: true, textLen: text.length, textHead: text.slice(0, 160), parseOk: false, resultsRaw: 0, afterFilter: 0 })
     return []
   }
-  const results = Array.isArray(payload?.results) ? payload.results : []
-  return results
+  const raw = Array.isArray(payload?.results) ? payload.results : []
+  const mapped = raw
     .slice(0, maxResults)
     .map((r: any) => ({
       title: String(r.title ?? r.url ?? ''),
@@ -246,6 +281,19 @@ export async function searchParallel(
       source: 'parallel',
     }))
     .filter((r: SearchResult) => r.url)
+  if (mapped.length === 0) {
+    // `resultsRaw > 0` 而此处为 0 ⇒ 全被 `.filter(r => r.url)` 滤掉（字段名变了）；
+    // `resultsRaw === 0` ⇒ 真 0 结果（此时记 ok:0 是诚实的）。
+    diagZero({
+      hasText: true,
+      textLen: text.length,
+      textHead: text.slice(0, 160),
+      parseOk: true,
+      resultsRaw: raw.length,
+      afterFilter: 0,
+    })
+  }
+  return mapped
 }
 
 /** SearXNG 自托管 JSON API（无 key · 只绑本机 127.0.0.1）——零成本底座。
