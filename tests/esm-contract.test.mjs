@@ -49,10 +49,20 @@ test('产物不得出现裸 require( 调用（ESM 下必抛错并被 catch 吞�
   assert.deepEqual(offenders, [], `产物含裸 require（ESM 下未定义）：\n${offenders.join('\n')}`)
 })
 
-test('临时 profile 清理路径必须存在（防止修复被无意回退）', () => {
+test('临时 profile 清理必须走清扫器（防修复被无意回退）', () => {
   const src = readFileSync(join(root, 'src', 'robust.ts'), 'utf8')
+  // ① 静态导入仍必须在 —— 当年 `require()` 在 ESM 下未定义、被 catch 吞掉、每次调用泄漏一个目录
   assert.match(src, /import\s*\{\s*rmSync\s*\}\s*from\s*'node:fs'/, '必须静态导入 rmSync')
-  assert.match(src, /rmSync\(userData,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/, '必须清理 userData')
+  // ② 清理必须经清扫器 —— 只 kill 直接子进程会漏掉 Chrome 的多进程子树。
+  //    2026-10-10 实测：一个 renderer 孤儿满核烧了 46,108 CPU 秒 / 13.4 小时，
+  //    而原实现「只 rmSync + try 吞掉」在孤儿占着文件时**静默失败**，目录与进程一起留下。
+  assert.match(
+    src,
+    /cleanupProfileDir\(userData,\s*\(dir\)\s*=>\s*rmSync\(dir,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)\)/,
+    '必须经 cleanupProfileDir 清理 userData（含删不掉时的按 profile 目录认亲清扫）',
+  )
+  // ③ 反向断言：不得回退成裸 rmSync(userData) —— 那正是静默失败的老形状
+  assert.doesNotMatch(src, /^\s*rmSync\(userData,/m, '不得绕过清扫器直接 rmSync(userData)')
 })
 
 /**

@@ -8,6 +8,7 @@
 
 import { execFile } from 'node:child_process'
 import { rmSync } from 'node:fs'
+import { cleanupProfileDir } from './proc-sweep.js'
 import { httpGet, stripTags, htmlToText, UA } from './util.js'
 
 export type ChallengeType = 'ip-block' | 'js-challenge' | 'rate-limit' | 'waf' | 'none' | 'unknown'
@@ -142,7 +143,7 @@ async function fetchWithRetry(url: string, timeoutMs = 15000): Promise<{ text: s
 }
 
 /** L3 headless Chrome dump-dom：执行 JS challenge 后输出 DOM */
-async function fetchHeadless(url: string): Promise<{ text: string; status: number }> {
+async function fetchHeadless(url: string): Promise<{ text: string; status: number; swept: number }> {
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -160,7 +161,7 @@ async function fetchHeadless(url: string): Promise<{ text: string; status: numbe
   }
   if (!chrome) throw new Error('未找到 Chrome/Edge（headless 通道不可用）')
   const userData = `${process.env.TEMP || 'C:\\Windows\\Temp'}\\dsh-robust-${Date.now()}`
-  return new Promise<{ text: string; status: number }>((resolve, reject) => {
+  return new Promise<{ text: string; status: number; swept: number }>((resolve, reject) => {
     execFile(
       chrome,
       [
@@ -170,18 +171,18 @@ async function fetchHeadless(url: string): Promise<{ text: string; status: numbe
       ],
       { windowsHide: true, timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        // 清理临时 profile
-        // 注意：本包是 ESM（package.json type=module），**不得**用 require()——ESM 下
-        // require 未定义，会被这层 catch 吞掉，导致每次 headless 调用泄漏一个
-        // %TEMP%\dsh-robust-<ts> 目录（实测 15 个 / ~180MB）。用顶部静态 import 的 rmSync。
-        try {
-          rmSync(userData, { recursive: true, force: true })
-        } catch { /* 忽略 */ }
+        // 清理临时 profile：**先删，删不掉才扫进程杀整族**（事故说明见 proc-sweep.ts 头部）。
+        // 原实现只 rmSync 并在 try 里吞掉——而孤儿 renderer 占着文件时删不掉，于是
+        // 「目录 + 进程」一起留下，且**全静默**（2026-10-10 实测：一个 renderer 烧了
+        // 46,108 CPU 秒 / 13.4 小时，主人被风扇吵醒才发现）。
+        // 注意：本包是 ESM（type=module），**不得**用 require()——ESM 下 require 未定义，
+        // 会被 catch 吞掉，导致每次调用泄漏一个 %TEMP%\dsh-robust-<ts>（实测 15 个 / ~180MB）。
+        const cleanup = cleanupProfileDir(userData, (dir) => rmSync(dir, { recursive: true, force: true }))
         if (err && !stdout) return reject(new Error(`headless 失败: ${stderr || err.message}`))
         // 标题提取判断是否仍是 challenge
         const text = stdout || stderr || ''
         const status = detectChallenge(text, 200) !== 'none' ? 202 : 200
-        resolve({ text, status })
+        resolve({ text, status, swept: cleanup.swept })
       }
     )
   })
@@ -223,7 +224,11 @@ export async function fetchRobust(url: string, opts: { skipHeadless?: boolean; t
     try {
       const h = await fetchHeadless(url)
       const chH = detectChallenge(h.text, h.status)
-      attempts.push({ channel: 'headless', status: `${h.status}`, ok: chH === 'none' })
+      // `sweep>0` 表示清扫时发现有进程还占着 profile ⇒ 这一次**本来会泄漏**一个孤儿。
+      // 必须让它出现在工具输出里（模型可见面）——否则又退回「清理静默成功」的老路，而
+      // 静默正是这次事故的核心：13.4 小时满核，日志一片干净（AGENTS.md §5.10 规则 3）。
+      const sweepNote = h.swept > 0 ? ` sweep=${h.swept}(清掉孤儿)` : ''
+      attempts.push({ channel: 'headless', status: `${h.status}${sweepNote}`, ok: chH === 'none' })
       if (chH === 'none' && h.text.length > 100) {
         return finalize(url, h.text, 'headless', 'none', attempts)
       }
