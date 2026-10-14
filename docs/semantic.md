@@ -325,7 +325,7 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **U11（新，2026-09-18 · 未闭环）SearXNG 的实际监听面仍是 `*:18788`**：`ss -ltn` 显示 `*:18788`，
   即镜像入口脚本**没吃下** `SEARXNG_BIND_ADDRESS=127.0.0.1`（实测：只改 `settings.yml` 也无效）。
   mirrored 网络下这意味着端口可能与 Windows 侧共享暴露面。**未验证**是否能从局域网 IP 访问
-  （`curl --noproxy '*' http://192.168.50.204:18788/…` 在 VM 冷启窗口返回 000，证据不足）。
+  （`curl --noproxy '*' http://<internal-host>:18788/…` 在 VM 冷启窗口返回 000，证据不足）。
   倾向：下轮先做一次**明确的暴露面取证**（VM 热时从局域网侧试），再决定是否改用
   `bridge + 127.0.0.1:18788:8080` 发布（代价＝容器出网要另配 `host.docker.internal:16888`）。
 - **U12（新，2026-09-18 · 通道固有边界）上游引擎会限流**：同一查询连打若干次后，SearXNG 自己会如实报

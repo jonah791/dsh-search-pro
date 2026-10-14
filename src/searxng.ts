@@ -190,7 +190,7 @@ export function searxngDiagnostics(raw: string): { count: number; unresponsive: 
  *   未注册为服务的后台进程随会话消失。
  *   而**要防的东西是真的**：同批实测 `uptime` 显示 **VM 刚启动 0 分钟** ⇒ WSL2 确实会空闲关 VM，
  *   容器随之停、下次调用冷启 VM（10–20s 启动窗口内探测必失败）。
- *   ⇒ 正确修法是**配置级**（`/mnt/c/Users/tr/.wslconfig` 的 `[wsl2] vmIdleTimeout`，需 `wsl --shutdown` 生效），
+ *   ⇒ 正确修法是**配置级**（`<home>/.wslconfig` 的 `[wsl2] vmIdleTimeout`，需 `wsl --shutdown` 生效），
  *     或把保活注册成 **systemd unit**（本机 PID 1 已是 systemd）。**留在代码里只为幂等语义，不解决冷启。**
  * @param minutes - 保活时长（分钟）
  * @returns 幂等的 shell 片段
