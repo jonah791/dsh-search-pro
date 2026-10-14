@@ -14,7 +14,7 @@
   <a href="https://github.com/jonah791/dsh-search-pro"><img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-40%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-96%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：23 个检索/抓取工具的三层工具面——L1 表层多引擎（DDG/Brave/Bing + Tavily/Serper 补强 + 查询改写 + 站内定向）、L2 深网与 OSINT（学术/专利/GitHub/社区/WHOIS/子域/DNS/Shodan/网页档案/分享资源/代码敏感信息/暗网索引/泄露自查）、L3 Tor 与被墙抓取（含反爬四通道降级）。
