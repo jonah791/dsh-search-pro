@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, isStructuralPage, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -344,11 +344,16 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
     text: () => {
       try {
         if (!intelStore) return ''
-        const pending = intelStore.listItems({ status: 'new', limit: 1 }).filtered
-        if (pending === 0) return ''
+        const { items: unread } = intelStore.listItems({ status: 'new' })
+        if (unread.length === 0) return ''
+        // 分层读数（2026-10-16 实测驱动）：161 条未读里 118 条是页面噪音
+        // ⇒ 「N 条未读」这个数字**没有分辨力**——信噪比必须进读数本身，
+        // 否则我看到「160 条未读」会以为有大量情报，实际高价值的只有几十条。
+        const high = unread.filter((i) => i.kind === 'attachment' || i.kind === 'paper').length
+        const low = unread.length - high
         const st = readIntelStatus()
         const last = st?.lastScanAt ? localStamp(String(st.lastScanAt)) : '未扫过'
-        return `情报库：${pending} 条未读 · 上次扫描 ${last}（intel_digest 看内容 / intel_scan 立刻扫）`
+        return `情报库：${high} 条高价值未读（附件/论文）+ ${low} 条页面 · 上次扫描 ${last}（intel_digest 看内容 / intel_scan 立刻扫）`
       } catch {
         return ''
       }
@@ -1326,17 +1331,26 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const perTarget = args.limit ?? 10
         const targets = s.listTargets()
         const loaded = s.listItems({ status, limit: 500 })
+        // 价值优先（informativeness test 迁移 · 2026-10-16）：附件/论文排在页面之前——
+        // 同一目标里「新附件」的信息量远高于「新页面」，不排序时页面会淹掉附件。
+        const VALUE: Record<string, number> = { attachment: 0, paper: 0, page: 2, unknown: 3 }
+        const ranked = loaded.items.slice().sort((a, b) => {
+          const d = (VALUE[a.kind] ?? 3) - (VALUE[b.kind] ?? 3)
+          return d !== 0 ? d : String(b.foundAt).localeCompare(String(a.foundAt))
+        })
         const groups = new Map<string, any[]>()
-        for (const it of loaded.items) {
+        for (const it of ranked) {
           const arr = groups.get(it.targetId) ?? []
           if (arr.length < perTarget) arr.push(it)
           groups.set(it.targetId, arr)
         }
         const shown = [...groups.values()].reduce((n, a) => n + a.length, 0)
         const stats = intelStats(s.loadItems().items, targets)
+        const highShown = [...groups.values()].flat().filter((i) => i.kind === 'attachment' || i.kind === 'paper').length
         const lines: string[] = []
         lines.push(`# 情报汇总 · ${localStamp(new Date())}`)
-        lines.push(`条目 ${stats.total} 条（${status} ${shown} 条待看）· 监控目标 ${stats.targets} 个`)
+        lines.push(`条目 ${stats.total} 条（${status} ${shown} 条待看，其中高价值 ${highShown} 条）· 监控目标 ${stats.targets} 个`)
+        if (loaded.filtered > 500) lines.push(`⚠ 待看 ${loaded.filtered} 条超过显示上限 500——只列了价值最高的 500 条（其余仍可用 intel_list 查）`)
         if (loaded.badLines > 0) lines.push(`⚠ items.jsonl 有 ${loaded.badLines} 行无法解析`)
         const never = targets.filter((t) => !t.lastScanAt)
         if (never.length) lines.push(`⚠ 未扫过的目标 ${never.length} 个：${never.map((t) => t.id).join(', ')}`)
@@ -1361,6 +1375,87 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         }
         store.bump('intel_digest')
         return jsonSafe({ ok: true, count: shown, digest: lines.join('\n'), stats, shown, marked, results: [] })
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  })
+
+  // ── intel_prune：判据升级后的存量清理（2026-10-17）────────────────────────
+  // 存在理由：**判据会升级，存量不会自动跟上**。实测——结构页判据上线后，
+  // 库里仍有 76 条结构页（占未读 47.5%），它们不清理就会一直占着「未读」，
+  // 让读数失去分辨力（我看到「160 条未读」却不知道其中 76 条永远不可能是情报）。
+  //
+  // 纪律：软标记（append status=dropped，**可逆**，不删数据）+ 默认干跑
+  // （删除原语纪律：先看影响面再动手）+ 原因写进 meta（可追溯是哪条判据清的）。
+  reg({
+    name: 'intel_prune',
+    description:
+      '按**当前**判据清理情报库存量：把命中的未读条目标为 dropped（软标记，可逆，不删数据；再 append 一条 new 即可恢复）。缺省干跑只报影响面。用途：判据升级后让存量跟上——否则旧判据产的噪音会一直占着未读，让读数失去分辨力。',
+    parameters: {
+      rule: {
+        type: 'string',
+        enum: ['structural'],
+        description: '清理判据：structural=结构页（list/index/根/目录——容器不是情报；缺省）',
+      },
+      apply: { type: 'boolean', description: 'true 才真写（缺省 false = 干跑，只报影响面）' },
+    },
+    output: {
+      schema: resultsSchema({
+        rule: { type: 'string' },
+        scanned: { type: 'number' },
+        matched: { type: 'number' },
+        applied: { type: 'boolean' },
+        marked: { type: 'number' },
+        samples: { type: 'array', items: { type: 'string' } },
+      }),
+      render: (_a: any, v: any) => {
+        if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+        const lines = [
+          `# 情报清理（${v.rule}）${v.applied ? '· 已写入' : '· 干跑'}`,
+          `扫描 ${v.scanned} 条未读 · 命中 ${v.matched} 条` +
+            (v.applied ? ` · 已标 dropped ${v.marked} 条` : '（未写入——apply=true 才写）'),
+        ]
+        const samples: string[] = v.samples ?? []
+        if (samples.length) {
+          lines.push('', '## 样本（前 5）')
+          for (const u of samples) lines.push(`- ${u}`)
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args: any) {
+      if (!intelStore) return intelUnavailable()
+      const s = intelStore
+      try {
+        const rule = args.rule ?? 'structural'
+        const { items } = s.listItems({ status: 'new' })
+        const matched = items.filter((i) => isStructuralPage(i.url))
+        let marked = 0
+        if (args.apply) {
+          const at = new Date().toISOString()
+          for (const it of matched) {
+            s.appendItems([
+              {
+                ...it,
+                status: 'dropped' as const,
+                meta: { ...(it.meta ?? {}), droppedReason: rule, droppedAt: at },
+              },
+            ])
+            marked += 1
+          }
+        }
+        store.bump('intel_prune')
+        return jsonSafe({
+          ok: true,
+          rule,
+          scanned: items.length,
+          matched: matched.length,
+          applied: Boolean(args.apply),
+          marked,
+          samples: matched.slice(0, 5).map((i) => i.url),
+          results: [],
+        })
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) }
       }
