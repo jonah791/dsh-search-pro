@@ -1377,7 +1377,11 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const highShown = [...groups.values()].flat().filter((i) => isHighValue(i.kind)).length
         const lines: string[] = []
         lines.push(`# 情报汇总 · ${localStamp(new Date())}`)
-        lines.push(`条目 ${stats.total} 条（${status} ${shown} 条待看，其中高价值 ${highShown} 条）· 监控目标 ${stats.targets} 个`)
+        // 两个数必须分开说：`shown` 是**本次列出**的（受 perTarget 限制），
+        // `loaded.filtered` 才是**未读合计**。混成一句会让「15」被读成「只有 15 条未读」
+        // （2026-10-17 实测：未读 72 条时头部显示「new 15 条待看」，读数失真）
+        lines.push(`条目 ${stats.total} 条 · 监控目标 ${stats.targets} 个`)
+        lines.push(`本次列出 ${shown} 条（高价值 ${highShown} 条）· ${status} 合计 ${loaded.filtered} 条`)
         if (loaded.filtered > 500) lines.push(`⚠ 待看 ${loaded.filtered} 条超过显示上限 500——只列了价值最高的 500 条（其余仍可用 intel_list 查）`)
         if (loaded.badLines > 0) lines.push(`⚠ items.jsonl 有 ${loaded.badLines} 行无法解析`)
         const never = targets.filter((t) => !t.lastScanAt)

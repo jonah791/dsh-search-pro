@@ -181,6 +181,8 @@ test('★ isStructuralPage：真实线上样本——栏目页/根路径是容�
     'https://www.sues.edu.cn/17465/list.htm',
     'https://www.sues.edu.cn/213/list.htm',
     'https://www.sues.edu.cn/news/',
+    // 2026-10-17 线上抓出的漏判样本：正则只匹配 list.htm 时它被判成内容页进了库
+    'https://www.sues.edu.cn/26864/list2.htm',
   ]
   const content = [
     'https://www.sues.edu.cn/5d/6d/c26758a286061/page.htm',

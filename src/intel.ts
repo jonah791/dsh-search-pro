@@ -159,7 +159,9 @@ export function isStructuralPage(url: string): boolean {
   }
   const p = u.pathname
   if (p === '' || p === '/' || p.endsWith('/')) return true
-  return /\/(list|index|default|more|search|column|category|tag)\.(htm|html|php|jsp|aspx?|shtml)$/i.test(p)
+  // `\d*` 是必需的（2026-10-17 线上实测抓出）：`list2.htm` 这类**分页列表页**
+  // 只匹配 `list.htm` 会漏判 ⇒ 它进了情报库并被读成内容页（判据比对象宽）
+  return /\/(list|index|default|more|search|column|category|tag)\d*\.(htm|html|php|jsp|aspx?|shtml)$/i.test(p)
 }
 
 export interface WorthyOpts {
