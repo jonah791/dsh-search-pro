@@ -89,9 +89,59 @@ export function classifyItem(url: string, mime?: string, source?: string): Intel
   return 'unknown'
 }
 
-/** 该 URL 是否值得进情报库（站点协议文件不是情报） */
-export function isIntelWorthy(url: string): boolean {
-  return !isMetaFile(url) && /^https?:\/\//i.test(url)
+/**
+ * 结构页判据：**容器而非内容**。
+ *
+ * 存在理由（2026-10-16 线上实测）：161 条情报里 118 条是页面 URL，
+ * 而其中大量是 `list.htm` / 栏目页 / 根路径——这些是**站点结构**不是**情报**。
+ * 一个站有几千页，若「新 URL 即情报」，监控就退化成站点地图增量，无限产噪音。
+ *
+ * 判据形态：路径末尾是容器词（list/index/default/more/search/column/category）
+ * 或路径以 `/` 结尾（目录本身）。文章页用具体 ID（如 `/5d/6d/c26758a286061/page.htm`）
+ * ⇒ 不命中，保留。
+ *
+ * ⚠ 取舍方向：宁可漏报（把内容页误判成结构页）也不多报——情报系统的价值在信噪比，
+ * 噪音会让人不再看（HALT/S2G 的「宁欠报不早停」同款）。
+ */
+export function isStructuralPage(url: string): boolean {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return false
+  }
+  const p = u.pathname
+  if (p === '' || p === '/' || p.endsWith('/')) return true
+  return /\/(list|index|default|more|search|column|category|tag)\.(htm|html|php|jsp|aspx?|shtml)$/i.test(p)
+}
+
+export interface WorthyOpts {
+  /**
+   * 是否**首次基线扫描**（快照为空）。
+   *
+   * 基线只收高价值类：站点「本来就有这些页面」不是新闻，报出来等于把
+   * 站点地图当情报（2026-10-16 实测：161 条全是同一次基线扫描产的）。
+   * 附件与论文例外——它们本身就是信息载体，首次发现即有价值。
+   */
+  isBaseline?: boolean
+}
+
+/**
+ * 该 URL 是否值得进情报库。
+ *
+ * 三层判据（2026-10-16 升级）：① 非 http(s) / 协议文件 ⇒ 否
+ * ② 结构页 ⇒ **永远否**（容器不是内容，与是否基线无关）
+ * ③ 基线扫描 ⇒ 只有 attachment / paper 算情报
+ */
+export function isIntelWorthy(url: string, opts: WorthyOpts = {}): boolean {
+  if (!/^https?:\/\//i.test(url)) return false
+  if (isMetaFile(url)) return false
+  if (isStructuralPage(url)) return false
+  if (opts.isBaseline) {
+    const kind = classifyItem(url)
+    return kind === 'attachment' || kind === 'paper'
+  }
+  return true
 }
 
 export interface NormalizeInput {

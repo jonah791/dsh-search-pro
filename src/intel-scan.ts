@@ -105,9 +105,11 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
     }
   }
 
-  // 过滤掉不该进情报库的（站点协议文件等），再与快照比
-  const worthy = collected.found.filter((f) => isIntelWorthy(f.url))
+  // 先看快照是否为空——决定这次是不是**首次基线扫描**（基线只收高价值类）
   const known = store.loadSnapshot(target.id)
+  const isBaseline = known.size === 0
+  // 过滤掉不该进情报库的（协议文件 / 结构页 / 基线期的普通页面），再与快照比
+  const worthy = collected.found.filter((f) => isIntelWorthy(f.url, { isBaseline }))
   const fresh = diffNew(worthy, known)
 
   const now = new Date().toISOString()
@@ -123,16 +125,18 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
   )
 
   if (items.length > 0) store.appendItems(items)
-  // 快照 = 已知 ∪ 本轮扫到的（把**全部**worthy 记进去，而不只是新增——
-  // 否则那些「已知但本轮又扫到」的会在下轮被当成新的）
+  // 快照 = 已知 ∪ **本轮扫到的全部候选**（含被 worthy 过滤掉的）——
+  // 只记 worthy 会让被过滤的那些在下一轮「变成新的」（2026-10-16 修正：
+  // 快照的语义是「我见过什么」，worthy 的语义是「其中值得报的」，两者必须分开）
   const next = new Set(known)
-  for (const f of worthy) next.add(normalizeItem({ url: f.url, targetId: target.id, now }).id)
-  store.saveSnapshot(target.id, [...next], { lastScanAt: now, rawCount: worthy.length })
+  for (const f of collected.found) next.add(normalizeItem({ url: f.url, targetId: target.id, now }).id)
+  store.saveSnapshot(target.id, [...next], { lastScanAt: now, rawCount: collected.found.length })
   store.patchTarget(target.id, { lastScanAt: now, foundTotal: next.size })
 
   const sourceErrors = collected.sourceErrors ?? []
   // 全源失败 ⇒ 如实报 failed（不许因为「没抛异常」就报 ok——那正是 2026-10-16 的静默形状）
-  if (worthy.length === 0 && sourceErrors.length > 0) {
+  // 判据用**候选数**而非 worthy 数：worthy 被过滤光但候选非空 = 扫描成功只是没有值得报的
+  if (collected.found.length === 0 && sourceErrors.length > 0) {
     return {
       targetId: target.id,
       state: 'failed',

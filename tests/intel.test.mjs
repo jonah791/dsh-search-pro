@@ -11,6 +11,7 @@ import {
   fingerprint,
   diffNew,
   classifyItem,
+  isStructuralPage,
   isIntelWorthy,
   normalizeItem,
   intelStats,
@@ -162,4 +163,59 @@ test('summarizeScans：无 partial 时三个字段都是空值而非 undefined�
   assert.equal(s.partialCount, 0)
   assert.deepEqual(s.partialTargets, [])
   assert.deepEqual(s.sourceErrors, [])
+})
+
+// ── isStructuralPage / isIntelWorthy（信噪比升级 · 2026-10-16 线上 161 条驱动）──
+//
+// 背景：线上实测情报库 161 条里 118 条是页面 URL，且**全部产自同一次基线扫描**
+// ⇒ 「新 URL 即情报」把站点地图当成了情报，无限产噪音。判据据此升级为三层。
+
+test('★ isStructuralPage：真实线上样本——栏目页/根路径是容器，文章页是内容', () => {
+  // 样本直接取自 2026-10-16 线上情报库（sues.edu.cn 实爬结果，非构造样本）
+  const structural = [
+    'https://www.sues.edu.cn/',
+    'https://www.sues.edu.cn/zhxw/list.htm',
+    'https://www.sues.edu.cn/17465/list.htm',
+    'https://www.sues.edu.cn/213/list.htm',
+    'https://www.sues.edu.cn/news/',
+  ]
+  const content = [
+    'https://www.sues.edu.cn/5d/6d/c26758a286061/page.htm',
+    'https://www.sues.edu.cn/13/64/c278a267108/page.htm',
+    'https://www.sues.edu.cn/95/a7/c26791a300455/page.htm',
+  ]
+  for (const u of structural) assert.equal(isStructuralPage(u), true, `结构页漏判：${u}`)
+  for (const u of content) assert.equal(isStructuralPage(u), false, `内容页误判：${u}`)
+})
+
+test('isStructuralPage：非法输入原样放行（不抛，交给上层判据）', () => {
+  assert.equal(isStructuralPage('not a url'), false)
+})
+
+test('★ 尸体样本：list.htm 必须被拦——判据若恒 false 这条就挂', () => {
+  // 「恒为空的输出不是证据」：这条断言的就是「判据真的会拦」，而不是「它没拦错人」
+  assert.equal(isIntelWorthy('https://www.sues.edu.cn/17465/list.htm', { isBaseline: true }), false)
+  assert.equal(
+    isIntelWorthy('https://www.sues.edu.cn/17465/list.htm', { isBaseline: false }),
+    false,
+    '结构页与是否基线无关——容器永远不是情报',
+  )
+})
+
+test('★ isIntelWorthy：基线只收高价值类（附件/论文），后续扫描才收页面', () => {
+  const page = 'https://www.sues.edu.cn/5d/6d/c26758a286061/page.htm'
+  const att = 'https://www.sues.edu.cn/_upload/article/files/x/gonggao.pdf'
+  assert.equal(isIntelWorthy(page, { isBaseline: true }), false, '基线期「站点本来就有这页」不是新闻')
+  assert.equal(isIntelWorthy(page, { isBaseline: false }), true, '后续扫描新出现的页面可能是新闻')
+  assert.equal(isIntelWorthy(att, { isBaseline: true }), true, '附件首次发现即有价值（它本身就是信息载体）')
+  assert.equal(isIntelWorthy(att, { isBaseline: false }), true)
+})
+
+test('isIntelWorthy：不传 opts 时按「非基线」处理（向后兼容旧调用点）', () => {
+  assert.equal(isIntelWorthy('https://a.b/article/123.htm'), true)
+})
+
+test('isIntelWorthy：协议文件与非 http 仍被拦（原有判据不退化）', () => {
+  assert.equal(isIntelWorthy('https://a.b/robots.txt'), false)
+  assert.equal(isIntelWorthy('not-a-url'), false)
 })
