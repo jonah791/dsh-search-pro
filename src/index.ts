@@ -1294,13 +1294,14 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
 
   reg({
     name: 'intel_list',
-    description: '列情报条目：按发现时间降序，可按目标/状态过滤，并带统计（总数 / 按状态 / 按类型 / 按目标）。items.jsonl 的坏行数会响亮报出（文件被外力破坏过时不静默）。可选把某条标为某状态（itemId + setStatus）。',
+    description: '列情报条目：按发现时间降序，可按目标/状态过滤，并带统计（总数 / 按状态 / 按类型 / 按目标）。items.jsonl 的坏行数会响亮报出（文件被外力破坏过时不静默）。可选改状态：单条用 itemId，批量用 itemIds（都须配 setStatus）——批量时未找到的条目会响亮列出，不静默算成功。',
     parameters: {
       id: { type: 'string', description: '只看某目标' },
       status: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '只看某状态' },
       limit: { type: 'number', description: '条数上限（缺省 50）' },
-      itemId: { type: 'string', description: '（可选）要改状态的条目 id' },
-      setStatus: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '（可选）改成的状态——与 itemId 同传' },
+      itemId: { type: 'string', description: '（可选）要改状态的单条 id' },
+      itemIds: { type: 'array', items: { type: 'string' }, description: '（可选）批量改状态：id 数组（优先于 itemId）——存量清理用，逐条现算成败' },
+      setStatus: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '（可选）改成的状态——与 itemId / itemIds 同传' },
     },
     output: {
       schema: resultsSchema({
@@ -1315,9 +1316,20 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
       if (!intelStore) return intelUnavailable()
       const s = intelStore
       try {
-        if (args.itemId && args.setStatus) {
-          const done = s.updateStatus(args.itemId, args.setStatus)
-          return { ok: done, count: 0, note: done ? `${args.itemId} → ${args.setStatus}` : `未找到条目 ${args.itemId}`, results: [] }
+        const batch: string[] = Array.isArray(args.itemIds) && args.itemIds.length ? args.itemIds : args.itemId ? [args.itemId] : []
+        if (batch.length && !args.setStatus) {
+          return { ok: false, count: 0, note: '给了 itemId/itemIds 但缺 setStatus——改状态必须指明目标状态（否则参数被静默忽略）', results: [] }
+        }
+        if (batch.length) {
+          // 逐条现算成败：**未找到必须响亮报出**——静默算成功会让「标了 18 条」变成假读数
+          const missing = batch.filter((id) => !s.updateStatus(id, args.setStatus))
+          const okCount = batch.length - missing.length
+          return {
+            ok: missing.length === 0,
+            count: 0,
+            note: `标记 ${okCount}/${batch.length} 条 → ${args.setStatus}${missing.length ? ` · 未找到 ${missing.length} 条：${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ' …' : ''}` : ''}`,
+            results: [],
+          }
         }
         const loaded = s.listItems({ targetId: args.id, status: args.status, limit: args.limit ?? 50 })
         const stats = intelStats(s.loadItems().items, s.listTargets())

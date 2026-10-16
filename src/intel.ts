@@ -161,7 +161,16 @@ export function isStructuralPage(url: string): boolean {
   if (p === '' || p === '/' || p.endsWith('/')) return true
   // `\d*` 是必需的（2026-10-17 线上实测抓出）：`list2.htm` 这类**分页列表页**
   // 只匹配 `list.htm` 会漏判 ⇒ 它进了情报库并被读成内容页（判据比对象宽）
-  return /\/(list|index|default|more|search|column|category|tag)\d*\.(htm|html|php|jsp|aspx?|shtml)$/i.test(p)
+  //
+  // ⚠ 扩展名**不再枚举**（2026-10-17 第二次线上实测抓出）：上一版写死
+  // `\.(htm|html|php|jsp|aspx?|shtml)$`，于是 sues 站的 `list222.psp` 直接漏判进库。
+  // 同一个错我当天已经犯过一次（`kindTag` 的枚举漂移）——**枚举式判据注定在命名空间
+  // 扩张时静默失效**。改判据形态：容器词是**信息架构**产物（稳定、可枚举），
+  // 扩展名是**技术栈**产物（.psp/.do/.action/.jspx 层出不穷）⇒ 扩展名一律通配。
+  //
+  // `([\d_-]*)(\.[a-z0-9]{1,6})?$` 锚到**路径末段结尾**：容器词后只允许数字/下划线/连字符
+  // 与一个扩展名。⇒ `/index-2026-report` 这类**内容页**（字母紧跟）不命中，安全。
+  return /\/(list|index|default|more|search|column|category|tag|nav|menu)([\d_-]*)(\.[a-z0-9]{1,6})?$/i.test(p)
 }
 
 export interface WorthyOpts {

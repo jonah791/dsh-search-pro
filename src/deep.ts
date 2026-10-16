@@ -27,13 +27,60 @@ export async function academicSemanticScholar(query: string, limit = 8): Promise
   }))
 }
 
+/**
+ * 检索词 → arxiv 查询表达式。
+ *
+ * 存在理由（2026-10-17 两次线上实测驱动，两个极端都撞过）：
+ * ① **裸空格是 OR**——`deep web crawling hidden web` 实测被查成五个词的 OR，
+ *    20 条结果里强相关只有 2 条（10%），无关 15 条（75%）：`Semantic Web` /
+ *    `SPARQL Web Preemption` / `Web 3.0` / `City-on-Web`… 全都只是含 "web"。
+ * ② 但**整体加引号是过度修正**——把五个词锁成一个精确短语，arxiv 里不存在
+ *    这样的论文 ⇒ 从「全污染」跳到「全空」。判据比意图宽（①）或严（②）都是错。
+ *
+ * 正确形态：**意图由调用者用语法表达，代码不猜**——
+ * · 已含 arxiv 语法（字段前缀 `abs:` / 布尔 `AND|OR|ANDNOT` / 引号 / 括号）⇒ 原样透传
+ * · 否则多词 ⇒ 逐词 `all:` + `AND` 连接（显式收窄，**绝不产出裸空格**）
+ * · 单词 ⇒ 原样
+ */
+export function arxivQuery(raw: string): string {
+  const q = raw.trim()
+  if (!q) return q
+  if (/[:"()]|\b(?:AND|OR|ANDNOT)\b/.test(q)) return q
+  // 去重：`deep web crawling hidden web` 里 web 出现两次 ⇒ 重复的 `all:web` 只是噪音
+  const terms = [...new Set(q.split(/\s+/).filter(Boolean))]
+  if (terms.length <= 1) return q
+  return terms.map((t) => `all:${t}`).join(' AND ')
+}
+
+/**
+ * arxiv 查询串编码（**不能用 encodeURIComponent**）。
+ *
+ * 2026-10-17 线上实测 + 官方手册（info.arxiv.org/help/api/user-manual.html §5.1）核对：
+ * · `:` 是**字段前缀的语法成分**（`au:del_maestro` / `all:deep`）——`encodeURIComponent`
+ *   把它编成 `%3A` ⇒ arxiv 不认前缀、**回退成全文检索** ⇒ 实测 3/3 返回无关论文
+ *   （`Manifold DivideMix` / `Backdoor Defenses`，与「深网发现」毫无关系）。
+ * · 空格：官方示例一律用 `+`（`search_query=au:del_maestro+AND+ti:checkerboard`）。
+ * · 引号是短语检索形态 ⇒ 编成 `%22`。
+ *
+ * ⚠ 替换顺序：**先编码字面 `+`，最后才把空格换成 `+`**——反了的话用户输入里的
+ * 加号会被当分隔符、而空格变成 `%2B`（两次都错）。
+ */
+export function encodeArxivQuery(q: string): string {
+  return q
+    .replace(/\+/g, '%2B')
+    .replace(/"/g, '%22')
+    .replace(/&/g, '%26')
+    .replace(/#/g, '%23')
+    .replace(/ /g, '+')
+}
+
 export async function academicArxiv(query: string, limit = 8): Promise<DeepResult[]> {
-  // 两处 2026-10-17 实测修正：
+  // 三处 2026-10-17 实测修正：
   // ① **https 而非 http**——http 走一次重定向，慢且偶发失败（失败又被上层吞成空数组）
-  // ② **短语检索要加引号**——裸空格被 arxiv 解析成 OR：`self-improving agent`
-  //    实际查的是 `self-improving OR agent`（返回 105746 条，与意图完全不同）
-  const q = encodeURIComponent(`"${query}"`)
-  const xml = await httpGet(`https://export.arxiv.org/api/query?search_query=all:${q}&max_results=${limit}`)
+  // ② **查询表达式化**（见 arxivQuery）——裸空格 OR 会灌进 75% 噪音
+  // ③ **编码不能用 encodeURIComponent**（见 encodeArxivQuery）——冒号被编码 ⇒ 前缀失效
+  const q = encodeArxivQuery(arxivQuery(query))
+  const xml = await httpGet(`https://export.arxiv.org/api/query?search_query=${q}&max_results=${limit}`)
   const entries = xml.split(/<entry>/i).slice(1)
   return entries.slice(0, limit).map((e) => {
     const title = stripTags(e.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '')

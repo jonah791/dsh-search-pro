@@ -183,11 +183,18 @@ test('★ isStructuralPage：真实线上样本——栏目页/根路径是容�
     'https://www.sues.edu.cn/news/',
     // 2026-10-17 线上抓出的漏判样本：正则只匹配 list.htm 时它被判成内容页进了库
     'https://www.sues.edu.cn/26864/list2.htm',
+    // 2026-10-17 第二次线上抓出（**同一个错的第二次**）：扩展名写死白名单，
+    // 于是 sues 站的 `.psp` 直接漏判进库（list222.psp / list231.psp 出现在 digest 里）。
+    // ⇒ 扩展名一律通配，只枚举容器词（信息架构产物稳定，技术栈扩展名层出不穷）。
+    'https://www.sues.edu.cn/26864/list222.psp',
+    'https://www.sues.edu.cn/26866/list231.psp',
   ]
   const content = [
     'https://www.sues.edu.cn/5d/6d/c26758a286061/page.htm',
     'https://www.sues.edu.cn/13/64/c278a267108/page.htm',
     'https://www.sues.edu.cn/95/a7/c26791a300455/page.htm',
+    // 判据不得比对象宽：数字 ID 路径（非容器词）是内容页
+    'https://www.sues.edu.cn/info/1024/5678.htm',
   ]
   for (const u of structural) assert.equal(isStructuralPage(u), true, `结构页漏判：${u}`)
   for (const u of content) assert.equal(isStructuralPage(u), false, `内容页误判：${u}`)
