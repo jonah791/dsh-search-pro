@@ -213,6 +213,8 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A36 | **结构页判据的扩展名通配**（I6） | `npm test` → `isStructuralPage` 线上样本新增 `list222.psp`/`list231.psp`（sues 站实抓）；**反向注入**：旧正则（扩展名白名单）对两条 `.psp` 判 `false`、新判据判 `true`，两条真内容页两者一致 ⇒ 测试有区分力；线上：`intel_prune` 干跑精确命中 2 条，apply 后未读页面 35→33 | **已实测（2026-10-17）** |
 | A37 | **arxiv 查询构造**（I13） | `npm test` → `tests/arxiv-query.test.mjs` 8 例（含 3 具尸体样本：裸空格必产 AND / 冒号绝不被编码 / 重复词去重）；线上：错误信息带出构造后的 URL `search_query=all:deep+AND+all:web+AND+all:crawling+AND+all:hidden`（冒号保留、空格 `+`、去重生效）。⚠ **「结果质量」未验证**——限速 429 挡住（见 U18） | **部分实测（2026-10-17）** |
 | A38 | **情报时间窗**（推送场景） | `npm test` → `tests/intel-store.test.mjs` 4 例（时间窗 / 尸体样本「foundAt 坏值不算最近新增」/ 与状态·目标过滤 AND 叠加 / 坏值退化不退化成空）；线上：`intel_digest sinceHours=1` ⇒ 全量 110 条 → **16 条**（列出 6），读数含「时间窗：最近 1 小时」 | **已实测（2026-10-17）** |
+| A39 | **条目记源侧发布时间**（I14：时效性判据可算） | `npm test` → `tests/intel-api-time.test.mjs` 12 例（**真实语料锚**：币安 `releaseDate: 1791948608368` ⇒ `2026-10-14T03:30:08.368Z`、OKX `pTime: "1792152012457"` ⇒ 同一 ISO；秒级量级判据；**尸体样本**：`'abc'`/`0`/`-1`/`123`/`999999999`/`{}` 一律 `undefined`——**不猜**；`timePath` 配错必须 notes 响亮；不配 `timePath` 不产且不报噪音）；线上：OKX `扫到 20 · 新增 0 · **补写时间 20**`，库里 40 条 api 条目全部带源侧时间；`intel_digest` 新读数 **`时效：最新 6.4h 前 · 最老 24.5d 前 · 时间未知 50 条`** ⇒ 「未读 90 条全高价值」被修正为「真正新鲜（<24h）的只有 2 条」 | **已实测（2026-10-17）** |
+| A40 | **读数透传（不手写字段枚举）**（I15） | `npm test` → `tests/render-intel-scan.test.mjs` 6 例（透传 `backfilled` / **未知字段照传**（未来的字段不必回来改）/ 渲染出「补写时间 20」/ **反向**：无 `backfilled` 不得显示「补写时间 0」/ 时效标签 / 「时间未知」）。**该判据已用真实缺陷标定**：改回手写枚举 ⇒ 第 1 条立刻挂（第三次同型事故的形状） | **已实测（2026-10-17）** |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 
@@ -226,6 +228,15 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **未实现/未验证**：`archive.ts:archiveTodayLookup` **已实现但未接入任何工具**（死代码）；README 提到的 SearXNG 增强**未实现**；`community` 的 `tieba` 平台仅在类型里（`CommunityPlatform`），`COMMUNITY_PLATFORMS` 与工具 enum 均只含 `reddit/hn/4chan`。
 
 ## 9 · 实践修订记录
+
+- **2026-10-17 · 情报系统·源侧发布时间（时效性判据从「无从计算」变可算；**第三次同型事故**）**
+  - **动机（实测读数驱动）**：digest 报「未读 90 条全部高价值」，而**推送判据里写着「且有**时效性**」却无从计算**——条目只记 `foundAt`（我的扫描时刻）。取证发现：两个 api 源**本来就有**发布时间字段（币安 `releaseDate` / OKX `pTime`），而首扫把 **16–22 天跨度**的条目全报成「新」（现算：OKX 最新 6.09h / 最老 392h；币安最新 62.6h / 最老 586.6h）。
+  - **改动**：`intel-api` 加 `timePath` + `parseApiTime`（毫秒/秒/ISO；**解析不出不猜**——编个时间会让判据建在假数上，而假数看起来与真数一样）+ 失败**计数并报出**；`intel` 加 `publishedAt`（与 `foundAt` 语义分离）+ `ageHours`/`ageLabel` + `pickBackfill`；`intel-store` 加 `patchItem`（补写字段，与 `updateStatus` 分开——状态是裁决、字段是事实）；`intel-scan` 传时间 + **存量回填** + `backfilled` 读数；`intel_watch update` 支持 spec 字段级合并（**U19 闭环**）；三处渲染显示时效；digest 加时效读数 + 组内按 `publishedAt` 排序（api 源同批 `foundAt` **完全相同** ⇒ 只按它排等于没排）。
+  - **★ 通用缺口（值得单独记住）**：`diffNew` 按指纹去重 ⇒ 已报过的条目**不会重报**，也就**永远不会**带上新字段 ⇒ **任何「给持久化条目加字段」的改动都要配回填机制**。线上验证：OKX `扫到 20 · 新增 0 · 补写时间 20`。
+  - **★ 第三次同型事故**：`intel_scan` 的 `outcomes` 是**手写字段枚举** ⇒ 新加的 `backfilled` **静默丢掉**——**回填真的成功了**（库里 20 条已带 `publishedAt`），读数里却只有「扫到 20 · 新增 0」。前两次是 `kindTag` 枚举漂移、分支返回形状没同步渲染层。**⇒ 结构修法**：抽 `toOutcome()` **透传**（只排除 `items`），并把该性质写成**可离线测的纯函数**（A40；改回手写枚举第 1 条立刻挂）。
+  - **★ 同类缺陷第二实例（字段在传输链上丢失）**：`deep.ts` 早就取了 arxiv 的 `extra.published`，而 `intel-scan` 的 arxiv 分支只取 `{url,title,source}` ⇒ 36 条论文全「时间未知」。修法：抽 `publishedAtFromExtra()` 具名函数使**接线可测**。**存量回填待 arxiv 限速解除**（U20）。
+  - **收益（这才是它的意义）**：digest 新读数 **`时效：最新 6.4h 前 · 最老 24.5d 前 · 时间未知 50 条`** ⇒ **「未读 90 条全高价值」被修正为「真正新鲜（<24h）的只有 2 条」**。
+  - **测试 231 → 239**（`intel-api-time` 12 例含真实语料锚 + `render-intel-scan` 6 例含反向案例）。
 
 - **2026-10-17 · 发现层 + 抽取层 + 情报系统（24→32 工具；判据被线上读数修了 5 次）**
   - **动机（主人指令链）**：「继续提升搜索能力，借鉴 github 的优秀项目」（**是优秀项目，不是高 star 的水货**）→「让互联网上的大多数信息都能成为你搜索库的一部分」→「**信息提取反而是容易的，难的是发现**」（这句推翻了我的原诊断）→「搭建情报系统」。
@@ -328,7 +339,9 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **U16（新，2026-10-17）情报推送未实测**：`intel_digest` 出文本 + telegram 发送是**两个独立动作**（推送与否归主体裁决，见 §1 反定位）。判据已写进技能 `deep-web-discovery`（高价值新增 + 有时效性 + 非睡眠时段），但**一次真实推送都没做过**（深夜不宜打扰）⇒ 早间汇总时验证。
 - **U17（新，2026-10-17）`.doc` 抽取未验证**：`antiword` 因 apt 依赖冲突未装上，`extract_document.py` **如实报「未验证」**（不假装能读）。老式 `.doc` 在政府/高校站点常见，是覆盖缺口而非已知不可行。
 - **U18（新，2026-10-17）arxiv 修复后的「结果质量」未验证**：I13 的编码修复**请求形态已线上验证**（错误信息带出构造后的 URL，冒号保留 / 空格 `+` / 去重生效），但**「返回的论文是否真的相关」没验**——限速 429 挡住了（本机 IP 当晚连打 8+ 次，单次 429 响应耗时 16.2s）。⚠ 附带发现（已登记任务板 `t-2dfb92b5`）：429 响应慢时会**撞 `httpGet` 超时**，于是「被限速」被读成「超时」（`This operation was aborted`）——**归因方向被误导**。⇒ 待限速窗口过后重扫一次，用「新条目相关性」作为判据（旧 20 条的污染率 75% 是基准线）。
-- **U19（新，2026-10-17）`intel_watch` 改不了 spec——监控源无法演进**：`action=update` 只改 `note`，改不了 `query` / `url` / `maxPages` / `itemsPath`。想改 query 就只能 `remove` + `add`，而 `add` 会**清快照**（正确，否则增量判据失真）⇒ **代价是丢 `foundTotal` 与历史**。本轮就是这么处理 `arxiv-deepweb` 的（旧 20 条几乎全是垃圾，删了重建反而是净收益）——但那是**运气**，不是判据。⇒ 待做：`update` 支持可选 `spec`（部分合并 + 按 kind 校验必填项），且**改 spec 时显式报出「快照已清」**。已登记任务板 `t-e6ecec0a`。
+- **U19（新，2026-10-17）`intel_watch` 改不了 spec——监控源无法演进**：`action=update` 只改 `note`，改不了 `query` / `url` / `maxPages` / `itemsPath`。想改 query 就只能 `remove` + `add`，而 `add` 会**清快照**（正确，否则增量判据失真）⇒ **代价是丢 `foundTotal` 与历史**。本轮就是这么处理 `arxiv-deepweb` 的（旧 20 条几乎全是垃圾，删了重建反而是净收益）——但那是**运气**，不是判据。⇒ 待做：`update` 支持可选 `spec`（部分合并 + 按 kind 校验必填项），且**改 spec 时显式报出「快照已清」**。已登记任务板 `t-e6ecec0a`。**（2026-10-17 02:2x 已闭环：`update` 支持 spec 字段级合并——辅助字段（`timePath`/`titlePath`/`idPath`/`urlTemplate`/`maxPages`）**不清快照**，取数范围（`url`/`domain`/`query`/`itemsPath`）变了才清并**显式报出**；线上实测 `已更新 api-okx-listing：timePath / note`）**
+- **U20（新，2026-10-17）arxiv 源产的是「论文库」不是「情报流」**：digest 里两条 arxiv 论文是 **2016 / 2020 年**的——arxiv API **默认按相关性排序**，不是按提交时间 ⇒ 监控源拿到的永远是「该主题的经典论文」，不是「新论文」。**修法方向**：`sortBy=submittedDate&sortOrder=descending`（arxiv API 标准参数），但**未取证**（02:24 实测仍 `Rate exceeded.`）⇒ 按 §5.9「能力断言先探测」，**未验证的参数不加**。
+  ⚠ 同一处还有第二个待办：arxiv 的**存量回填**（36 条论文的 `publishedAt`）也要等限速解除——接线**已上线**（`publishedAtFromExtra`），但**回填必须重扫**，而限速挡着。**实测边界**：限速窗口 **> 32 分钟**（01:51 调用 → 02:24 仍 `Rate exceeded.`，14 字节立即返回，**不是超时**）；每次试探都在延长窗口。
 
 - **U2 缓存淘汰只清过期项**：`set()` 在 `size > 500` 时仅删 `expiresAt` 已过的键；高活跃会话可超 500 条常驻。
 - **U3 `SearchStore` 作用域**：实例在 `apply()` 内创建——单 web 进程内多会话是否共享同一实例（→ 缓存/配额是否跨会话串味）待实测确认；确认后回写本节。
