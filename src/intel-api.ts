@@ -128,6 +128,19 @@ function fromEpoch(n: number): string | undefined {
 }
 
 /**
+ * 从 academic 源的 `extra` 里取发布时间（arxiv 给 `published: 'YYYY-MM-DD'`，
+ * 见 `deep.ts` 的 `academicArxiv`）。
+ *
+ * 抽成**具名函数**的理由：接线处（intel-scan 的 arxiv 分支）只调它一次，
+ * 而这条性质**可离线测**——「字段有却被丢在传输链上」正是 2026-10-17 抓到的形状
+ * （36 条论文全「时间未知」，而 `extra.published` 早就在返回值里）。
+ */
+export function publishedAtFromExtra(extra: unknown): string | undefined {
+  if (!extra || typeof extra !== 'object') return undefined
+  return parseApiTime((extra as Record<string, unknown>).published)
+}
+
+/**
  * 把 JSON 响应映射成候选列表。
  *
  * `source` 固定为 `'api'`——与 crawl / commoncrawl / arxiv 并列，

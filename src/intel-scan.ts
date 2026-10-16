@@ -11,7 +11,7 @@
 import { discoverSite } from './discover-site.js'
 import { discoverUrls } from './discover-fetch.js'
 import { searchAcademic } from './deep.js'
-import { mapApiItems } from './intel-api.js'
+import { mapApiItems, publishedAtFromExtra } from './intel-api.js'
 import { diffNew, isIntelWorthy, normalizeItem, pickBackfill, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
 import type { IntelStore } from './intel-store.js'
 
@@ -72,7 +72,13 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
     const rs = await searchAcademic(q, 'arxiv', target.spec.maxPages ?? 15, (s, e) => {
       errs.push(`${s}: ${e instanceof Error ? e.message : String(e)}`)
     })
-    const found = rs.map((r) => ({ url: r.url, title: r.title, source: 'arxiv' }))
+    const found = rs.map((r) => {
+      // 论文的发布时间决定它是不是**新论文**（2026-10-17：36 条论文全「时间未知」，
+      // 而字段**早就在手里**——deep.ts 已取 `extra.published`，只是这里没接上。
+      // 与 api 源的 timePath 是同一类缺陷的第二个实例：**字段有，传输链上丢了**。）
+      const publishedAt = publishedAtFromExtra((r as unknown as { extra?: unknown }).extra)
+      return { url: r.url, title: r.title, source: 'arxiv', ...(publishedAt ? { publishedAt } : {}) }
+    })
     return { found, sourceErrors: errs }
   }
   if (target.kind === 'api') {

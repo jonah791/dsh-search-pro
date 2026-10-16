@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseApiTime, mapApiItems } from '../lib/intel-api.js'
+import { parseApiTime, mapApiItems, publishedAtFromExtra } from '../lib/intel-api.js'
 import { ageLabel, ageHours, pickBackfill } from '../lib/intel.js'
 
 // ── 真实语料锚（2026-10-17 线上实抓）──────────────────────────────────────
@@ -60,6 +60,25 @@ test('★ 尸体样本：解析不出的一律 undefined（不猜——编个时
   // 量级不够的数字：既不是合法秒也不是合法毫秒。有意取严——
   // 宁可显示「时间未知」，也不显示 1970 年（那看起来和真时间一模一样）
   assert.equal(parseApiTime(999_999_999), undefined)
+})
+
+test('★ arxiv 形态：纯日期串（YYYY-MM-DD）也认——deep.ts 给的就是这个形态', () => {
+  const iso = parseApiTime('2026-10-14')
+  assert.equal(Date.parse(iso), Date.parse('2026-10-14T00:00:00.000Z'))
+  assert.ok(iso.startsWith('2026-10-14'))
+})
+
+test('★ publishedAtFromExtra：从 academic 源的 extra 取时间（接线处只调它一次）', () => {
+  // arxiv 的真实形状（deep.ts L90）
+  assert.equal(publishedAtFromExtra({ published: '2026-10-14' }), '2026-10-14T00:00:00.000Z')
+  // 缺字段 / 坏形状一律 undefined（不猜）——「字段有却被丢在传输链上」正是抓到的形状，
+  // 所以这里也必须有尸体样本：不然「接线丢了」会被读成「源没给」
+  assert.equal(publishedAtFromExtra({}), undefined)
+  assert.equal(publishedAtFromExtra({ published: '' }), undefined)
+  assert.equal(publishedAtFromExtra({ published: 'not-a-date' }), undefined)
+  assert.equal(publishedAtFromExtra(undefined), undefined)
+  assert.equal(publishedAtFromExtra(null), undefined)
+  assert.equal(publishedAtFromExtra('2026-10-14'), undefined)
 })
 
 test('★ mapApiItems：配了 timePath ⇒ 条目带 publishedAt（真实响应形状）', () => {
