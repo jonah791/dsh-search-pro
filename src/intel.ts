@@ -24,8 +24,18 @@ export interface IntelItem {
   kind: 'page' | 'attachment' | 'paper' | 'api' | 'unknown'
   /** 标题（源提供时） */
   title?: string
-  /** 发现时间（ISO） */
+  /** 发现时间（ISO）——**我的扫描时刻**，增量判据用它 */
   foundAt: string
+  /**
+   * 源侧发布时间（ISO）——**源自己的时刻**，时效性判据用它。
+   *
+   * 与 foundAt **必须分开**（§5.10 语义精确性）：一个 2018 年的老附件今天才被扫到，
+   * foundAt 是今天（它确实是**新情报**），publishedAt 是 2018 年（它**没有时效性**）。
+   * 两者混用会让「推不推」这个判断失去依据。
+   *
+   * 缺省 = **源没给**（不是「刚发布」）——渲染时必须显示为「时间未知」。
+   */
+  publishedAt?: string
   status: 'new' | 'seen' | 'starred' | 'dropped'
   /** 来源标注（crawl / commoncrawl / crtsh / arxiv …） */
   source?: string
@@ -58,6 +68,8 @@ export interface IntelTarget {
     titlePath?: string
     /** api：条目链接模板（`{字段名}` 占位），如 `https://x/{code}` */
     urlTemplate?: string
+    /** api：发布时间字段名（如币安 `releaseDate` / OKX `pTime`）——毫秒/秒时间戳或 ISO 字符串 */
+    timePath?: string
   }
   note?: string
   createdAt: string
@@ -222,6 +234,8 @@ export interface NormalizeInput {
   now?: string
   /** 初始状态（缺省 new） */
   status?: IntelItem['status']
+  /** 源侧发布时间（ISO；源没给就不传——缺省**不是**「现在」） */
+  publishedAt?: string
 }
 
 /** 把发现结果规整成情报条目（指纹即 id，天然幂等） */
@@ -234,10 +248,66 @@ export function normalizeItem(raw: NormalizeInput): IntelItem {
     kind: classifyItem(fp, raw.mime, raw.source),
     ...(raw.title ? { title: raw.title } : {}),
     foundAt: raw.now ?? new Date().toISOString(),
+    ...(raw.publishedAt ? { publishedAt: raw.publishedAt } : {}),
     status: raw.status ?? 'new',
     ...(raw.source ? { source: raw.source } : {}),
     ...(raw.mime || raw.meta ? { meta: { ...(raw.mime ? { mime: raw.mime } : {}), ...(raw.meta ?? {}) } } : {}),
   }
+}
+
+/**
+ * 条目时效（小时）。`publishedAt` 缺省或解析不出 ⇒ `undefined`。
+ *
+ * **「时间未知」不是「刚发布」**（2026-10-17）：缺 publishedAt 时若渲染成 0 小时，
+ * 陈旧公告会被显示成新闻。`now` 可注入 ⇒ 纯函数可离线测。
+ */
+export function ageHours(publishedAt: string | undefined, now: number = Date.now()): number | undefined {
+  if (!publishedAt) return undefined
+  const t = Date.parse(publishedAt)
+  if (Number.isNaN(t)) return undefined
+  return (now - t) / 3_600_000
+}
+
+/**
+ * 时效的**显示标签**（渲染层单一真源，避免每处各写一遍分档）。
+ * 负值显形为「未来」——源给的时间在将来说明字段选错或时区错，**必须看得见**。
+ */
+export function ageLabel(publishedAt: string | undefined, now: number = Date.now()): string {
+  const h = ageHours(publishedAt, now)
+  if (h === undefined) return '时间未知'
+  if (h < 0) return `未来 ${Math.abs(h).toFixed(1)}h`
+  if (h < 48) return `${h.toFixed(1)}h 前`
+  return `${(h / 24).toFixed(1)}d 前`
+}
+
+/**
+ * 存量回填：**给已落盘的条目补上后加的字段**。
+ *
+ * 为什么必须有（2026-10-17 实测）：`diffNew` 按 URL 指纹去重 ⇒ 已报过的条目
+ * **不会重报**，也就**永远不会**带上新字段。这是「给持久化条目加字段」这类改动的
+ * 通用缺口，不是这一次的特例——库里那 40 条 api 条目全是「时间未知」，
+ * 不补写就永远补不上。
+ *
+ * 幂等：已有 publishedAt 的条目**不动**（后写胜语义下，重复补写会污染事件流）。
+ * 返回**要补写的清单**（纯函数不落盘；落盘由调用方做）。
+ */
+export function pickBackfill(
+  found: Array<{ url: string; publishedAt?: string }>,
+  known: IntelItem[],
+): Array<{ id: string; publishedAt: string }> {
+  const byId = new Map(known.map((i) => [i.id, i]))
+  const out: Array<{ id: string; publishedAt: string }> = []
+  const seen = new Set<string>()
+  for (const f of found) {
+    if (!f.publishedAt) continue
+    const id = fingerprint(f.url)
+    if (seen.has(id)) continue
+    const cur = byId.get(id)
+    if (!cur || cur.publishedAt) continue
+    seen.add(id)
+    out.push({ id, publishedAt: f.publishedAt })
+  }
+  return out
 }
 
 /** 统计（进结论的读数必须现算） */

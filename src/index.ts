@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, isStructuralPage, isHighValue, kindTag, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, isStructuralPage, isHighValue, kindTag, ageLabel, ageHours, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -1138,6 +1138,11 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         type: 'string',
         description: 'kind=api：条目链接模板（{字段名} 占位），如 https://www.binance.com/en/support/announcement/{code}',
       },
+      timePath: {
+        type: 'string',
+        description:
+          'kind=api：发布时间字段名（如币安 releaseDate / OKX pTime）——毫秒/秒时间戳或 ISO 字符串。配上它，「时效性」才有依据；不配则该源条目一律显示「时间未知」（不是「刚发布」）',
+      },
     },
     output: {
       schema: resultsSchema({
@@ -1163,8 +1168,39 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         }
         if (action === 'update') {
           if (!args.id) return { ok: false, error: 'update 需要 id' }
-          const done = s.patchTarget(args.id, args.note === undefined ? {} : { note: args.note })
-          return { ok: done, count: 0, note: done ? `已更新 ${args.id}` : `未找到目标 ${args.id}`, results: [] }
+          const prev = s.getTarget(args.id)
+          if (!prev) return { ok: false, error: `未找到目标 ${args.id}` }
+          // spec 字段**级合并**（只覆盖给到的）——避免「改一个字段把别的抹掉」。
+          // 2026-10-17 补：此前 update 只能改 note（U19 登记的未决项），
+          // 于是「给已有 api 源补 timePath」这种改法在工具面上**不存在**，
+          // 只能手改 targets.json（绕过工具面 = 绕过留痕）。
+          const specKeys = ['url', 'domain', 'query', 'itemsPath', 'idPath', 'titlePath', 'urlTemplate', 'timePath', 'maxPages', 'maxDepth'] as const
+          const specPatch: Record<string, unknown> = {}
+          for (const k of specKeys) {
+            if (args[k] !== undefined) specPatch[k] = args[k]
+          }
+          const patch: Partial<IntelTarget> = {}
+          if (args.note !== undefined) patch.note = args.note
+          if (Object.keys(specPatch).length) patch.spec = { ...prev.spec, ...specPatch } as IntelTarget['spec']
+          if (!Object.keys(patch).length) {
+            return { ok: false, error: 'update 需要至少一个要改的字段（note / url / query / itemsPath / timePath / maxPages …）' }
+          }
+          // 改了**取数范围** ⇒ 等于换了一个源 ⇒ 清快照。
+          // 不清的话新范围的条目会被旧快照挡住而永不报出（与 re-add 同理，2026-10-17）。
+          // 辅助类字段（timePath / titlePath / idPath / urlTemplate / maxPages）**不清**——
+          // 它们不改变「哪些条目属于这个源」，清快照只会造成全量重报。
+          const rangeKeys = ['url', 'domain', 'query', 'itemsPath'] as const
+          const rangeChanged = rangeKeys.some((k) => args[k] !== undefined && args[k] !== (prev.spec as Record<string, unknown>)[k])
+          if (rangeChanged) s.clearSnapshot(args.id)
+          const done = s.patchTarget(args.id, patch)
+          const changed = [...Object.keys(specPatch), ...(args.note !== undefined ? ['note'] : [])]
+          return jsonSafe({
+            ok: done,
+            count: 0,
+            target: { ...prev, ...patch },
+            note: `已更新 ${args.id}：${changed.join(' / ')}${rangeChanged ? '（取数范围变了 ⇒ 快照已清，下次扫描按全新目标算）' : ''}`,
+            results: [],
+          })
         }
         const kind = args.kind
         if (kind !== 'site' && kind !== 'domain' && kind !== 'arxiv' && kind !== 'api') {
@@ -1190,6 +1226,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           if (args.idPath) spec.idPath = args.idPath
           if (args.titlePath) spec.titlePath = args.titlePath
           if (args.urlTemplate) spec.urlTemplate = args.urlTemplate
+          if (args.timePath) spec.timePath = args.timePath
         } else {
           if (!args.query) return { ok: false, error: 'kind=arxiv 需要 query' }
           spec.query = args.query
@@ -1278,11 +1315,8 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           ok: true,
           count: items.length,
           ...summary,
-          outcomes: results.map((r) => ({
-            targetId: r.targetId, state: r.state, foundCount: r.foundCount, newCount: r.newCount,
-            error: r.error, confidence: r.confidence, gaps: r.gaps, elapsedMs: r.elapsedMs,
-            partial: r.partial, sourceErrors: r.sourceErrors,
-          })),
+          // 透传（不手写字段枚举）——见 toOutcome 注释：手写列表会让新增字段**静默丢掉**
+          outcomes: results.map(toOutcome),
           items,
           results: [],
         })
@@ -1379,7 +1413,14 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const rank = (k: string): number => (isHighValue(k) ? 0 : k === 'page' ? 2 : 3)
         const ranked = loaded.items.slice().sort((a, b) => {
           const d = rank(a.kind) - rank(b.kind)
-          return d !== 0 ? d : String(b.foundAt).localeCompare(String(a.foundAt))
+          if (d !== 0) return d
+          // 组内按**时效**排（publishedAt 优先，缺则退回 foundAt）。
+          // 2026-10-17 实测：api 源同一批扫描的条目 foundAt **完全相同**（都是 00:19）
+          // ⇒ 只按 foundAt 排等于没排，最新那条会被埋在 20 条里。
+          // 两者都是 ISO 串 ⇒ 字典序即时间序。
+          const ta = a.publishedAt ?? a.foundAt
+          const tb = b.publishedAt ?? b.foundAt
+          return String(tb).localeCompare(String(ta))
         })
         const groups = new Map<string, any[]>()
         for (const it of ranked) {
@@ -1402,6 +1443,21 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         if (since) lines.push(`时间窗：最近 ${hours} 小时（按**发现**时间 foundAt，非源侧发布时间）`)
         if (loaded.filtered > 500) lines.push(`⚠ 待看 ${loaded.filtered} 条超过显示上限 500——只列了价值最高的 500 条（其余仍可用 intel_list 查）`)
         if (loaded.badLines > 0) lines.push(`⚠ items.jsonl 有 ${loaded.badLines} 行无法解析`)
+        // 时效读数（2026-10-17）：推送判据是「有新增 + **有时效性**」，
+        // 而此前条目只记 foundAt（我的扫描时刻）⇒ 这条判据**无从计算**，形同虚设。
+        // 现在把它变成一行可读的数——推不推由我看着这个数裁（§2.4 判断不可代填）。
+        const ages = loaded.items.map((i) => ageHours(i.publishedAt)).filter((h): h is number => h !== undefined)
+        const unknownAge = loaded.items.length - ages.length
+        if (loaded.items.length > 0) {
+          if (ages.length) {
+            const newest = Math.min(...ages)
+            const oldest = Math.max(...ages)
+            const fmtAge = (h: number) => (h < 48 ? `${h.toFixed(1)}h` : `${(h / 24).toFixed(1)}d`)
+            lines.push(`时效：最新 ${fmtAge(newest)} 前 · 最老 ${fmtAge(oldest)} 前${unknownAge ? ` · 时间未知 ${unknownAge} 条` : ''}`)
+          } else {
+            lines.push(`⚠ 时效未知（${loaded.items.length} 条全无源侧发布时间）——推送判据「有时效性」无从计算`)
+          }
+        }
         const never = targets.filter((t) => !t.lastScanAt)
         if (never.length) lines.push(`⚠ 未扫过的目标 ${never.length} 个：${never.map((t) => t.id).join(', ')}`)
         if (shown === 0) {
@@ -1415,7 +1471,9 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           lines.push(`## ${tid}（${items.length} 条）`)
           for (const it of items) {
             const tag = kindTag(it.kind)
-            lines.push(`${tag} ${it.title || it.url}`)
+            // 时效进**推送文本**：读的人必须在文本里看见它，
+            // 否则「这条还值不值得推」只能靠猜
+            lines.push(`${tag} ${ageLabel(it.publishedAt)} ${it.title || it.url}`)
             if (it.title) lines.push(`   ${it.url}`)
           }
         }
@@ -1592,8 +1650,24 @@ export function renderIntelWatch(_a: any, v: any): any[] {
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
+/**
+ * 把 ScanResult 折成读数用的 outcome：**排除 items**（它已在顶层汇总），其余**原样透传**。
+ *
+ * ⚠ 抽成纯函数的理由（2026-10-17 **第三次同型事故**）：此前是 inline 的**手写字段枚举**，
+ * 于是新加的 `backfilled` **静默丢掉**——回填真的成功了（库里 20 条已带 publishedAt），
+ * 读数里却只有「扫到 20 · 新增 0」。这与 `kindTag` 的枚举漂移、分支返回形状没同步
+ * 渲染层是**同一个错**：新增字段 / 新增 kind 时，手写列表必然漏。
+ * ⇒ 结构修法：透传（新增字段自动进读数）+ 纯函数（这条性质**可离线测**，
+ * 不再依赖「下次记得改两处」）。
+ */
+export function toOutcome(r: any): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...r }
+  delete out.items
+  return out
+}
+
 /** 扫描渲染：逐目标读数 + 失败清单 + 新增条目。「无新增」与「失败」分开说 */
-function renderIntelScan(_a: any, v: any): any[] {
+export function renderIntelScan(_a: any, v: any): any[] {
   if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
   const partial = v.partialCount ? ` · ⚠部分源失败 ${v.partialCount}` : ''
   const parts = [`# 情报扫描：${v.scanned} 个目标 · 成功 ${v.okCount} · 失败 ${v.failedCount}${partial} · 扫到 ${v.foundTotal} · 新增 ${v.newTotal}`]
@@ -1604,7 +1678,10 @@ function renderIntelScan(_a: any, v: any): any[] {
     parts.push('## 逐目标读数')
     for (const o of outs) {
       const state = o.state === 'ok' ? '✅' : '❌'
-      parts.push(`· ${state} \`${o.targetId}\` 扫到 ${o.foundCount} · 新增 ${o.newCount} · ${o.elapsedMs}ms`)
+      // 补写读数必须显形：它是「给已落盘条目补字段」的唯一证据——
+      // 不报的话，「回填成功」与「什么都没发生」在读数上长得一样
+      const bf = o.backfilled ? ` · 补写时间 ${o.backfilled}` : ''
+      parts.push(`· ${state} \`${o.targetId}\` 扫到 ${o.foundCount} · 新增 ${o.newCount}${bf} · ${o.elapsedMs}ms`)
       if (o.error) parts.push(`  ⚠ ${o.error}`)
       if (o.partial) parts.push('  ⚠ 部分源失败（扫到的是剩余源的结果，读数可能缩水）')
       if (Array.isArray(o.sourceErrors)) {
@@ -1630,7 +1707,7 @@ function renderIntelScan(_a: any, v: any): any[] {
     parts.push(`## 新增条目（${items.length}）`)
     for (const it of items.slice(0, 20)) {
       const tag = kindTag(it.kind)
-      parts.push(`· ${tag} ${it.title || it.url}${it.source ? ` (${it.source})` : ''}`)
+      parts.push(`· ${tag} ${ageLabel(it.publishedAt)} ${it.title || it.url}${it.source ? ` (${it.source})` : ''}`)
     }
     if (items.length > 20) parts.push(`… 另有 ${items.length - 20} 条`)
   } else if (v.okCount > 0) {
@@ -1664,7 +1741,10 @@ export function renderIntelList(_a: any, v: any): any[] {
     parts.push(`## 条目（显示 ${items.length} · 命中 ${v.filtered ?? items.length}）`)
     for (const it of items) {
       const when = localStamp(it.foundAt)
-      parts.push(`· [${it.kind}/${it.status}] ${when} \`${it.targetId}\``)
+      // 时效与发现时间**并列显示**（2026-10-17）：两者语义不同——
+      // foundAt 是「我什么时候扫到的」，publishedAt 是「源什么时候发的」。
+      // 只显示前者会让 16 天前的公告看起来像今天的新情报。
+      parts.push(`· [${it.kind}/${it.status}] ${when} · ${ageLabel(it.publishedAt)} \`${it.targetId}\``)
       if (it.title) parts.push(`  ${it.title}`)
       parts.push(`  ${it.url}`)
     }

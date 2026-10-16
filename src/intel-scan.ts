@@ -12,7 +12,7 @@ import { discoverSite } from './discover-site.js'
 import { discoverUrls } from './discover-fetch.js'
 import { searchAcademic } from './deep.js'
 import { mapApiItems } from './intel-api.js'
-import { diffNew, isIntelWorthy, normalizeItem, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
+import { diffNew, isIntelWorthy, normalizeItem, pickBackfill, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
 import type { IntelStore } from './intel-store.js'
 
 export interface ScanOpts {
@@ -26,10 +26,12 @@ export interface ScanResult extends ScanOutcome {
   items: IntelItem[]
   /** 本轮扫到的候选总数（去重前） */
   rawCount: number
+  /** 本轮**补写**了 publishedAt 的存量条目数（「给已落盘条目加字段」的通用缺口，见 pickBackfill） */
+  backfilled?: number
 }
 
 interface Collected {
-  found: Array<{ url: string; title?: string; source?: string; mime?: string }>
+  found: Array<{ url: string; title?: string; source?: string; mime?: string; publishedAt?: string }>
   confidence?: string
   gaps?: string[]
   error?: string
@@ -91,6 +93,7 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
         ...(target.spec.idPath ? { idPath: target.spec.idPath } : {}),
         ...(target.spec.titlePath ? { titlePath: target.spec.titlePath } : {}),
         ...(target.spec.urlTemplate ? { urlTemplate: target.spec.urlTemplate } : {}),
+        ...(target.spec.timePath ? { timePath: target.spec.timePath } : {}),
       })
       return {
         found: mapped.items,
@@ -157,11 +160,24 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
       source: f.source,
       title: f.title,
       mime: f.mime,
+      ...(f.publishedAt ? { publishedAt: f.publishedAt } : {}),
       now,
     }),
   )
 
   if (items.length > 0) store.appendItems(items)
+
+  // 存量回填（2026-10-17）：已落盘但缺 publishedAt 的条目，本轮拿到时间就补写。
+  // 必要性：diffNew 按指纹去重 ⇒ 已报过的条目**不会重报**，也就**永远不会**带上新字段
+  // ——这是「给持久化条目加字段」这类改动的通用缺口，不是这一次的特例。
+  // 只在候选真带了发布时间时才读库（site/domain 源没有 ⇒ 零开销）。
+  let backfilled = 0
+  if (collected.found.some((f) => f.publishedAt)) {
+    const knownItems = store.listItems({ targetId: target.id, limit: 0 }).items
+    const toBackfill = pickBackfill(collected.found, knownItems)
+    for (const b of toBackfill) store.patchItem(b.id, { publishedAt: b.publishedAt })
+    backfilled = toBackfill.length
+  }
   // 快照 = 已知 ∪ **本轮扫到的全部候选**（含被 worthy 过滤掉的）——
   // 只记 worthy 会让被过滤的那些在下一轮「变成新的」（2026-10-16 修正：
   // 快照的语义是「我见过什么」，worthy 的语义是「其中值得报的」，两者必须分开）
@@ -199,6 +215,7 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
     elapsedMs: Date.now() - t0,
     items,
     rawCount: collected.found.length,
+    ...(backfilled > 0 ? { backfilled } : {}),
   }
 }
 

@@ -26,12 +26,22 @@ export interface ApiSpec {
   /** 条目链接模板，如 `https://www.binance.com/en/support/announcement/{code}`
    *  —— `{字段名}` 会被条目上的同名字段替换；缺字段时该条**跳过并计数**（不产残缺 URL） */
   urlTemplate?: string
+  /**
+   * 发布时间字段名（如币安 `releaseDate` / OKX `pTime`）。
+   *
+   * 存在理由（2026-10-17 线上实测抓出）：**两个源本来就有这个字段**，而我只记了
+   * `foundAt`（我的扫描时刻）⇒ 首扫把 **16–22 天跨度**的条目全报成「新」——
+   * 「新发布」与「新发现」被混为一谈，而推送判据里写着「且有时效性」却**无从计算**。
+   */
+  timePath?: string
 }
 
 export interface ApiCandidate {
   url: string
   title?: string
   source?: string
+  /** 源侧发布时间（ISO）。**解析不出时不产**（不猜）——编一个时间会让时效性判据建在假数上 */
+  publishedAt?: string
 }
 
 export interface ApiMapResult {
@@ -87,6 +97,37 @@ export function renderTemplate(tpl: string, item: Record<string, unknown>): stri
 }
 
 /**
+ * 解析源侧发布时间 ⇒ ISO。支持：
+ * - 时间戳（数字，或纯数字字符串）：量级判据 —— `≥1e12` 视为**毫秒**，`≥1e9` 视为**秒**
+ * - 可被 `Date.parse` 的字符串（ISO / `2026-10-14 03:30:00`）
+ *
+ * **解析不出返回 undefined（不猜）**：编一个时间会让「时效性」判据建在假数上，
+ * 而假数看起来与真数一模一样。调用方必须把这个失败**计数并报出**——
+ * 「源没给时间」与「时间是空的」是两件事（§5.10）。
+ */
+export function parseApiTime(v: unknown): string | undefined {
+  if (v === null || v === undefined || v === '') return undefined
+  if (typeof v === 'number') return fromEpoch(v)
+  if (typeof v === 'string') {
+    const s = v.trim()
+    if (!s) return undefined
+    if (/^\d+$/.test(s)) return fromEpoch(Number(s))
+    const t = Date.parse(s)
+    return Number.isNaN(t) ? undefined : new Date(t).toISOString()
+  }
+  return undefined
+}
+
+/** 纪元值 ⇒ ISO。`< 1e9` 一律不可信（既不是合法秒也不是合法毫秒时间戳） */
+function fromEpoch(n: number): string | undefined {
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  const ms = n >= 1e12 ? n : n >= 1e9 ? n * 1000 : NaN
+  if (Number.isNaN(ms)) return undefined
+  const d = new Date(ms)
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
+}
+
+/**
  * 把 JSON 响应映射成候选列表。
  *
  * `source` 固定为 `'api'`——与 crawl / commoncrawl / arxiv 并列，
@@ -109,9 +150,11 @@ export function mapApiItems(json: unknown, spec: ApiSpec): ApiMapResult {
 
   const idKey = spec.idPath ?? 'id'
   const titleKey = spec.titlePath ?? 'title'
+  const timeKey = spec.timePath
   const items: ApiCandidate[] = []
   const notes: string[] = []
   let skipped = 0
+  let noTime = 0
   for (const raw of arr) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       skipped += 1
@@ -130,12 +173,17 @@ export function mapApiItems(json: unknown, spec: ApiSpec): ApiMapResult {
       continue
     }
     const tv = it[titleKey]
+    const publishedAt = timeKey ? parseApiTime(it[timeKey]) : undefined
+    if (timeKey && !publishedAt) noTime += 1
     items.push({
       url,
       ...(tv === undefined || tv === null || tv === '' ? {} : { title: String(tv) }),
+      ...(publishedAt ? { publishedAt } : {}),
       source: 'api',
     })
   }
   if (skipped > 0) notes.push(`跳过 ${skipped}/${arr.length} 条（缺 id 或模板字段）`)
+  // 时间解析失败必须显形：不报的话「源改了时间字段名」会被读成「这批公告没有发布时间」
+  if (timeKey && noTime > 0) notes.push(`时间解析失败 ${noTime}/${arr.length} 条（字段 ${timeKey}）`)
   return { items, skipped, notes, errors }
 }

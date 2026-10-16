@@ -219,6 +219,21 @@ export class IntelStore {
     return true
   }
 
+  /**
+   * 补写条目字段（append 同 id 记录 = 后写胜）。
+   *
+   * 与 updateStatus 分开的理由：状态是**我的裁决**，字段是**源的事实**——
+   * 两者语义不同（2026-10-17：存量回填 publishedAt 需要它，而 updateStatus
+   * 只能改 status，改不了字段）。
+   */
+  patchItem(id: string, patch: Partial<IntelItem>): boolean {
+    const { items } = this.loadItems()
+    const found = items.find((i) => i.id === id)
+    if (!found) return false
+    this.appendItems([{ ...found, ...patch }])
+    return true
+  }
+
   /** 已知指纹全集（跨目标——用于「这条是不是别处已经报过」的去重） */
   knownFingerprints(): Set<string> {
     return new Set(this.loadItems().items.map((i) => i.id))
