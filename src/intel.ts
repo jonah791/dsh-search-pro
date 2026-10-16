@@ -77,6 +77,37 @@ export interface IntelTarget {
   lastScanAt?: string
   /** 累计发现条目数 */
   foundTotal?: number
+  /**
+   * 该目标的扫描周期（分钟）。缺省 ⇒ 用全局 `config.intelScanMinutes`。
+   *
+   * 存在理由（2026-10-17 · 信息差实证驱动）：全局单一周期对**快源**太慢、对**慢源**太频。
+   * 实测：币安下架公告（EPIC/QUICK）发布当日即 **−25% ~ −29%**，行情几小时内走完大半，
+   * 而全局缺省是 **360 分钟（6 小时）** ⇒ 最长 6 小时后才看到，**信号已经走掉了**。
+   * 而站点爬取 / arxiv 这类慢源 6 小时足够（更频只会浪费预算并触发限速）。
+   */
+  scanMinutes?: number
+}
+
+/**
+ * 按**目标**判「到期该扫」⇒ 返回该扫的目标 id 列表。
+ *
+ * 存在理由（2026-10-17 · 信息差实证驱动）：此前是**全局单周期**（status.json 的 lastScanAt），
+ * 对快源太慢、对慢源太频——币安下架公告（EPIC/QUICK）发布当日即 **−25%~−29%**，
+ * 而全局缺省 **360 分钟** ⇒ 最长 6 小时后才看到，**信号已经走掉了**。
+ *
+ * 抽成**纯函数**（而非 apply 内闭包）是为了可离线测：三种情形各有判据——
+ * ① 目标自带 `scanMinutes` ⇒ 用它；② 坏值/缺省 ⇒ 回落全局；③ **从没扫过 ⇒ 立刻到期**
+ * （否则新登记的目标要干等一个周期才首扫）。
+ */
+export function dueTargetIds(targets: IntelTarget[], nowMs: number, globalMinutes: number): string[] {
+  return targets
+    .filter((t) => {
+      const per = typeof t.scanMinutes === 'number' && t.scanMinutes > 0 ? t.scanMinutes : globalMinutes
+      const last = t.lastScanAt ? Date.parse(String(t.lastScanAt)) : NaN
+      if (!Number.isFinite(last)) return true
+      return nowMs - last >= per * 60_000
+    })
+    .map((t) => t.id)
 }
 
 /**

@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, isStructuralPage, isHighValue, kindTag, ageLabel, ageHours, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, isStructuralPage, isHighValue, kindTag, ageLabel, ageHours, dueTargetIds, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -293,12 +293,16 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
       logger.warn(`情报状态写入失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
-  const runIntelScan = async (reason: string): Promise<void> => {
+  const runIntelScan = async (reason: string, targetIds?: string[]): Promise<void> => {
     if (!intelStore) return
     try {
       if (intelStore.listTargets().length === 0) return
       const t0 = Date.now()
-      const results = await scanAll(intelStore, { delayMs: 200 })
+      // targetIds 给了就只扫这些（按目标到期）；不给 ⇒ 全扫（手动/兼容旧调用）
+      const results = await scanAll(intelStore, {
+        delayMs: 200,
+        ...(targetIds && targetIds.length ? { targetIds } : {}),
+      })
       const summary = summarizeScans(results)
       writeIntelStatus({
         lastScanAt: new Date().toISOString(),
@@ -319,18 +323,20 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
     const intelTimer = setInterval(() => {
       void (async () => {
         try {
-          const st = readIntelStatus()
-          const last = st?.lastScanAt ? Date.parse(String(st.lastScanAt)) : 0
-          if (Number.isFinite(last) && Date.now() - last >= intelIntervalMinutes * 60_000) {
-            await runIntelScan('timer')
-          }
+          // 按**目标**判到期（2026-10-17 改，见 dueTargetIds 注释）：
+          // 全局单周期对快源太慢——币安下架公告当日 −25%~−29%，而缺省是 360 分钟
+          // ⇒ 最长 6 小时后才看到，**信号已经走掉了**。
+          const due = dueTargetIds(intelStore.listTargets(), Date.now(), intelIntervalMinutes)
+          if (due.length > 0) await runIntelScan('timer', due)
         } catch (e) {
           logger.warn(`情报到期检查失败：${e instanceof Error ? e.message : String(e)}`)
         }
       })()
     }, 60_000)
     intelTimer.unref?.()
-    logger.info(`情报定时扫描已装载：每 ${intelIntervalMinutes} 分钟（到期检查粒度 60s）`)
+    logger.info(
+      `情报定时扫描已装载：全局 ${intelIntervalMinutes} 分钟（目标可用 scanMinutes 覆盖 · 到期检查粒度 60s）`,
+    )
   }
 
   // ── 情报状态注入（2026-10-16）────────────────────────────────────────────
@@ -1143,6 +1149,11 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         description:
           'kind=api：发布时间字段名（如币安 releaseDate / OKX pTime）——毫秒/秒时间戳或 ISO 字符串。配上它，「时效性」才有依据；不配则该源条目一律显示「时间未知」（不是「刚发布」）',
       },
+      scanMinutes: {
+        type: 'number',
+        description:
+          '该目标的扫描周期（分钟）——覆盖全局缺省（360）。快源该设小（币安下架公告当日就走完 −25%~−29% 的行情，6 小时会错过），慢源（站点爬取/arxiv）保持缺省（更频只浪费预算并触发限速）',
+      },
     },
     output: {
       schema: resultsSchema({
@@ -1181,6 +1192,8 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           }
           const patch: Partial<IntelTarget> = {}
           if (args.note !== undefined) patch.note = args.note
+          // scanMinutes 是 **target 顶层**字段（调度属性，不是源规格）⇒ 不进 specPatch
+          if (args.scanMinutes !== undefined) patch.scanMinutes = args.scanMinutes
           if (Object.keys(specPatch).length) patch.spec = { ...prev.spec, ...specPatch } as IntelTarget['spec']
           if (!Object.keys(patch).length) {
             return { ok: false, error: 'update 需要至少一个要改的字段（note / url / query / itemsPath / timePath / maxPages …）' }
@@ -1193,7 +1206,11 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           const rangeChanged = rangeKeys.some((k) => args[k] !== undefined && args[k] !== (prev.spec as Record<string, unknown>)[k])
           if (rangeChanged) s.clearSnapshot(args.id)
           const done = s.patchTarget(args.id, patch)
-          const changed = [...Object.keys(specPatch), ...(args.note !== undefined ? ['note'] : [])]
+          const changed = [
+            ...Object.keys(specPatch),
+            ...(args.note !== undefined ? ['note'] : []),
+            ...(args.scanMinutes !== undefined ? ['scanMinutes'] : []),
+          ]
           return jsonSafe({
             ok: done,
             count: 0,
@@ -1237,12 +1254,14 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const prev = s.getTarget(id)
         // 重加时清快照——否则新目标「继承」旧快照会让增量判据失真（与 removeTarget 同理）
         if (prev) s.clearSnapshot(id)
+        const scanMinutes = args.scanMinutes ?? prev?.scanMinutes
         const target: IntelTarget = {
           id, kind, spec,
           note: args.note ?? prev?.note,
           createdAt: prev?.createdAt ?? new Date().toISOString(),
           lastScanAt: prev?.lastScanAt,
           foundTotal: prev?.foundTotal,
+          ...(scanMinutes !== undefined ? { scanMinutes } : {}),
         }
         s.upsertTarget(target)
         return jsonSafe({
