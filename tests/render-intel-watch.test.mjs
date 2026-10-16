@@ -41,3 +41,26 @@ test('add 分支（note + 无 targets）同样不误报', () => {
   assert.match(t, /已登记 x/)
   assert.ok(!t.includes('尚无监控目标'))
 })
+
+test('★ 扫描周期显形：设了 scanMinutes 的目标必须显示「每 N 分钟」', () => {
+  // 它是「快源会不会被全局拖住」的唯一读数——不显示则「我给它设了 30 分钟」在工具面上无法复核
+  const t = text({
+    ok: true,
+    count: 1,
+    targets: [
+      { id: 'api-binance-delisting', kind: 'api', spec: { url: 'https://x' }, scanMinutes: 30, lastScanAt: '2026-10-17T00:00:00.000Z' },
+    ],
+    dir: '/x',
+  })
+  assert.match(t, /每 30 分钟/)
+})
+
+test('★ 反向：没设 scanMinutes 的目标不得显示周期（不产无中生有的读数）', () => {
+  const t = text({
+    ok: true,
+    count: 1,
+    targets: [{ id: 'site-a', kind: 'site', spec: { url: 'https://x' }, lastScanAt: '2026-10-17T00:00:00.000Z' }],
+    dir: '/x',
+  })
+  assert.ok(!t.includes('每 '), `不得出现周期读数：${t}`)
+})

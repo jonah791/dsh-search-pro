@@ -1660,7 +1660,10 @@ export function renderIntelWatch(_a: any, v: any): any[] {
       const spec = t.spec?.url ?? t.spec?.domain ?? t.spec?.query ?? '?'
       const last = t.lastScanAt ? `上次 ${localStamp(t.lastScanAt)}` : '未扫过'
       const extra = t.spec?.maxPages ? ` · 上界 ${t.spec.maxPages}` : ''
-      lines.push(`· \`${t.id}\` [${t.kind}] ${spec}${extra} · ${last}${t.note ? ` · ${t.note}` : ''}`)
+      // 扫描周期必须显形（2026-10-17）：它是「快源会不会被全局拖住」的唯一读数——
+      // 不显示的话，「我给它设了 30 分钟」在工具面上**无法复核**
+      const period = t.scanMinutes ? ` · 每 ${t.scanMinutes} 分钟` : ''
+      lines.push(`· \`${t.id}\` [${t.kind}] ${spec}${extra}${period} · ${last}${t.note ? ` · ${t.note}` : ''}`)
     }
   } else if (isListResponse && !v.target) {
     lines.push('（尚无监控目标——用 intel_watch action=add 登记）')
