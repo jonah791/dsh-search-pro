@@ -184,12 +184,26 @@ export class IntelStore {
     return items.length
   }
 
-  /** 列条目（按发现时间降序；可按目标/状态过滤） */
-  listItems(opts: { targetId?: string; status?: string; limit?: number } = {}): ItemsLoad & { filtered: number } {
+  /** 列条目（按发现时间降序；可按目标/状态/**时间窗**过滤） */
+  listItems(opts: { targetId?: string; status?: string; limit?: number; since?: string } = {}): ItemsLoad & { filtered: number } {
     const { items, badLines } = this.loadItems()
     let out = items
     if (opts.targetId) out = out.filter((i) => i.targetId === opts.targetId)
     if (opts.status) out = out.filter((i) => i.status === opts.status)
+    // 时间窗（2026-10-17 · 推送场景）：推送的本质是**增量通知**，不是全量列表。
+    // ⚠ 语义是 **foundAt（发现时间）**，不是源侧发布时间——对站点类目标，
+    // 一个 2018 年的老附件今天才被扫到，它的 foundAt 就是今天（它确实是**新情报**）。
+    // 用 Date.parse 而非字符串比较：格式若漂移，字典序会静默给错答案。
+    // 解析不出的条目按「不在窗内」处理（判不出何时发现 ⇒ 不能算「最近新增」）。
+    if (opts.since) {
+      const t = Date.parse(opts.since)
+      if (Number.isFinite(t)) {
+        out = out.filter((i) => {
+          const f = Date.parse(String(i.foundAt))
+          return Number.isFinite(f) && f >= t
+        })
+      }
+    }
     const filtered = out.length
     out = out.slice().sort((a, b) => String(b.foundAt).localeCompare(String(a.foundAt)))
     if (opts.limit && opts.limit > 0) out = out.slice(0, opts.limit)

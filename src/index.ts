@@ -1351,6 +1351,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
     parameters: {
       limit: { type: 'number', description: '每目标最多几条（缺省 10）' },
       status: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '取哪些状态（缺省 new）' },
+      sinceHours: { type: 'number', description: '（可选）只看最近 N 小时**发现**的条目——推送场景用（增量通知 ≠ 全量列表）。按 foundAt（发现时间）过滤，不是源侧发布时间' },
       markSeen: { type: 'boolean', description: '出完是否标 seen（缺省 false）' },
     },
     output: {
@@ -1369,7 +1370,9 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const status = args.status ?? 'new'
         const perTarget = args.limit ?? 10
         const targets = s.listTargets()
-        const loaded = s.listItems({ status, limit: 500 })
+        const hours = typeof args.sinceHours === 'number' && args.sinceHours > 0 ? args.sinceHours : 0
+        const since = hours > 0 ? new Date(Date.now() - hours * 3600_000).toISOString() : undefined
+        const loaded = s.listItems({ status, limit: 500, ...(since ? { since } : {}) })
         // 价值优先（informativeness test 迁移 · 2026-10-16）：高价值类排在页面之前——
         // 同一目标里「新附件」的信息量远高于「新页面」，不排序时页面会淹掉附件。
         // 判据走 isHighValue（单一真源）：新增高价值 kind 时只改一处。
@@ -1394,6 +1397,9 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         // （2026-10-17 实测：未读 72 条时头部显示「new 15 条待看」，读数失真）
         lines.push(`条目 ${stats.total} 条 · 监控目标 ${stats.targets} 个`)
         lines.push(`本次列出 ${shown} 条（高价值 ${highShown} 条）· ${status} 合计 ${loaded.filtered} 条`)
+        // 读数带范围标注（§5.9 规则 6）：有时间窗时必须写出来——否则「合计 N 条」
+        // 会被读成全量（与上面 `shown`/`filtered` 混读是同一种失真形状）
+        if (since) lines.push(`时间窗：最近 ${hours} 小时（按**发现**时间 foundAt，非源侧发布时间）`)
         if (loaded.filtered > 500) lines.push(`⚠ 待看 ${loaded.filtered} 条超过显示上限 500——只列了价值最高的 500 条（其余仍可用 intel_list 查）`)
         if (loaded.badLines > 0) lines.push(`⚠ items.jsonl 有 ${loaded.badLines} 行无法解析`)
         const never = targets.filter((t) => !t.lastScanAt)
