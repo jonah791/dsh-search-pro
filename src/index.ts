@@ -197,6 +197,8 @@ function renderSiteDiscover(_a: any, v: any): any[] {
     `robots.txt: ${rob.ok ? '✓' : '✗ ' + (rob.error ?? '')} · 其中 sitemap 线索 ${(rob.sitemaps ?? []).length} 条 · Disallow ${(rob.disallow ?? []).length} 条`,
     `sitemap 探测: ${probeLine}`,
     `爬取: 成功 ${st.fetched ?? 0} 页 · 失败 ${st.failed ?? 0} 页 · 最大深度 ${st.maxDepthReached ?? 0}`,
+    // CRATOR 三指标（2026-10-16 迁移）：失败率 / 吞吐 / 耗时——此前只有发现数，无这些口径
+    `吞吐: ${Number(st.pagesPerMinute ?? 0).toFixed(1)} 页/分 · 失败率 ${(Number(st.failureRate ?? 0) * 100).toFixed(1)}% · 耗时 ${(Number(st.elapsedMs ?? 0) / 1000).toFixed(1)}s`,
     `页面 ${(s.pages ?? []).length} · 附件 ${(s.attachments ?? []).length}（${extLine}）· feed ${(s.feeds ?? []).length}`,
     covLine,
   ].join('\n')
@@ -1051,6 +1053,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
       maxPages: { type: 'number', description: '最多访问页数（缺省 30，上界防爆炸）' },
       maxDepth: { type: 'number', description: '最大爬取深度（缺省 3）' },
       followPagination: { type: 'boolean', description: '是否跟随「下一页」分页链接（缺省 true）' },
+      useSearch: { type: 'boolean', description: '是否探测站内搜索接口并用种子词扩展 URL 前沿（缺省 true；关掉可做开/关对照实验——Harnessing the Deep Web 迁移）' },
     },
     output: {
       schema: resultsSchema({ site: { type: 'object', additionalProperties: true } }),
@@ -1062,6 +1065,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           maxPages: args.maxPages,
           maxDepth: args.maxDepth,
           followPagination: args.followPagination,
+          useSearch: args.useSearch,
         }),
       )
       if (!r.ok) return { ok: false, error: r.error }

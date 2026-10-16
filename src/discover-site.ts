@@ -63,6 +63,12 @@ export interface SiteDiscovery {
     failed: number
     maxDepthReached: number
     byExt: Record<string, number>
+    /** 失败率 = failed / (fetched + failed)（CRATOR arXiv:2405.06356 三指标之一，2026-10-16 迁移） */
+    failureRate: number
+    /** 吞吐 = 成功页数 / 分钟（CRATOR 的 performance 指标——此前只有发现率，无此口径） */
+    pagesPerMinute: number
+    /** 本次耗时 ms */
+    elapsedMs: number
   }
   errors: string[]
   /** 覆盖度自评（见 assessCoverage） */
@@ -269,6 +275,7 @@ export function parseSitemapText(text: string): string[] {
  * 返回「站点骨架」：页面 / 附件 / feed / sitemap 探测读数。
  */
 export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promise<SiteDiscovery> {
+  const t0 = Date.now()
   const maxPages = opts.maxPages ?? 30
   const maxDepth = opts.maxDepth ?? 3
   const delayMs = opts.delayMs ?? 300
@@ -477,6 +484,7 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
     feeds: feeds.size,
   })
 
+  const elapsedMs = Date.now() - t0
   return {
     base,
     robots: { ok: !robots.error, sitemaps: robots.sitemaps, disallow: robots.disallow, error: robots.error },
@@ -484,7 +492,13 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
     pages: [...pages],
     attachments: [...attachments],
     feeds: [...feeds],
-    stats: { fetched, failed, maxDepthReached, byExt },
+    stats: {
+      fetched, failed, maxDepthReached, byExt,
+      // CRATOR 三指标（2026-10-16 迁移）：失败率 / 吞吐 / 耗时——此前只有发现数，无这些口径
+      failureRate: fetched + failed > 0 ? failed / (fetched + failed) : 0,
+      pagesPerMinute: elapsedMs > 0 ? fetched / (elapsedMs / 60_000) : 0,
+      elapsedMs,
+    },
     errors,
     coverage,
     search: searchResult,
