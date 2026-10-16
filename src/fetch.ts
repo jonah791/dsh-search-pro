@@ -67,18 +67,48 @@ export async function fetchTor(url: string, mode: 'reader' | 'raw' = 'reader', t
   return { url, title: extractTitle(raw), content: htmlToText(raw), mode: 'reader', source: 'tor' }
 }
 
-/** 检查 WSL 内 Tor daemon 是否可达 */
-export async function torStatus(): Promise<{ ok: boolean; detail: string }> {
-  const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    execFile(
-      'wsl.exe',
-      ['-d', 'Ubuntu', '--', 'bash', '-lc', `curl -s --max-time 10 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/ | grep -o 'Congratulations' | head -1`],
-      { windowsHide: true, timeout: 15000 },
-      (err, stdout, stderr) => (err ? reject(err) : resolve({ stdout, stderr }))
-    )
-  })
-  const ok = result.stdout.trim() === 'Congratulations'
-  return ok
-    ? { ok: true, detail: 'Tor 出口可达（check.torproject.org 通过）' }
-    : { ok: false, detail: 'Tor 不可达：wsl 内 tor daemon 未运行或 SOCKS 9050 未监听（安装: sudo apt install tor && sudo service tor start）' }
+/**
+ * 检查 WSL 内 Tor 状态 —— **分两级**（2026-10-16 实测修正）
+ *
+ * ⚠ 旧版只问一个问题「check.torproject.org 通不通」，于是把「**daemon 在跑但这一跳不通**」
+ *   报成「daemon 未运行」，并给出「sudo service tor start」这种**错误处方**。
+ *   实测：本机 tor daemon 正常、SocksPort 在监听、部分目标可抓（6–24s），
+ *   唯独 check.torproject.org 稳定失败 ⇒ 整条通道被误判为「不可用」而遭放弃。
+ *
+ * ⇒ 拆成两个独立事实，各自可证伪：
+ *   · daemon —— SocksPort 是否在监听（本地事实，廉价，不依赖外网）
+ *   · circuit —— 经它能否真的取到内容（行为事实，需外网）
+ * 两者都不许互相冒充。
+ */
+export async function torStatus(): Promise<{ ok: boolean; detail: string; daemon: boolean; circuit: boolean }> {
+  const sh = (script: string, timeoutMs: number) =>
+    new Promise<string>((resolve, reject) => {
+      execFile('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', '-lc', script], { windowsHide: true, timeout: timeoutMs },
+        (err, stdout) => (err ? reject(err) : resolve(stdout)))
+    })
+
+  // ① daemon：SocksPort 有没有在听（不问外网）
+  let daemon = false
+  try {
+    const out = await sh(`ss -ltn 2>/dev/null | grep -c '127.0.0.1:9050'`, 8000)
+    daemon = out.trim() !== '0' && out.trim() !== ''
+  } catch { daemon = false }
+
+  // ② circuit：行为判据 —— 取出口 IP（快、稳、语义明确）
+  let circuit = false
+  let exitIp = ''
+  try {
+    const out = await sh(`curl -s --max-time 35 --socks5-hostname 127.0.0.1:9050 https://api.ipify.org`, 45000)
+    exitIp = out.trim()
+    circuit = /^\d{1,3}(\.\d{1,3}){3}$/.test(exitIp)
+  } catch { circuit = false }
+
+  const ok = daemon && circuit
+  const detail = ok
+    ? `Tor 可用：SocksPort 在听 · 出口 ${exitIp}`
+    : !daemon
+      ? 'Tor 不可用：WSL 内 SocksPort 9050 无监听（daemon 未起）'
+      : `Tor 降级：daemon 在跑但出网失败（出口未取得）——多为网桥握手失败/电路残缺；` +
+        `查 \`journalctl -u tor -n 20 | grep 'unable to connect'\`（网桥 vs 上游代理）`
+  return { ok, detail, daemon, circuit }
 }

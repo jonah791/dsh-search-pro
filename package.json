@@ -1,7 +1,7 @@
 {
   "name": "dsh-search-pro",
   "version": "0.1.0",
-  "description": "深度搜索插件：三层检索（表层多引擎/深网挖掘/Tor代理）+ 24 工具（搜索/抓取/OSINT/归档/分享检索）",
+  "description": "深度搜索插件：三层检索（表层多引擎/深网挖掘/Tor代理）+ 发现层（Common Crawl/crt.sh/站点爬取）+ 抽取层（附件→文本）+ 情报系统（监控/增量/推送）——工具清单见 plugin_inspect，不在文档写死数字（写死的必然漂移）",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

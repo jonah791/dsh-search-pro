@@ -1,9 +1,9 @@
-/** dsh-search-pro：三层深度搜索插件（表层多引擎 / 深网挖掘 / Tor 代理）· 24 工具 */
+/** dsh-search-pro：深度搜索插件——表层多引擎 / 深网挖掘 / Tor 代理 / 发现层（CC+crt.sh+爬取）/ 抽取层（附件→文本）/ 情报系统（工具数见运行时日志 `applied · N tools`，不在此写死） */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { buildQueries } from './buildQuery.js'
@@ -19,6 +19,13 @@ import { fetchPage, fetchTor, torStatus } from './fetch.js'
 import { searchNetdisk, searchMagnet, type ShareResult } from './share.js'
 import { searchCode, searchDarkweb, checkPasswordLeak } from './osint.js'
 import { fetchRobust } from './robust.js'
+import { discoverUrls, normalizeDomain } from './discover-fetch.js'
+import { discoverSite } from './discover-site.js'
+import { isAttachment, extOf } from './discover.js'
+import { fetchDocument } from './document.js'
+import { IntelStore } from './intel-store.js'
+import { scanTarget, scanAll } from './intel-scan.js'
+import { summarizeScans, intelStats, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -26,7 +33,7 @@ import {
 import { SearchStore } from './store.js'
 
 export const name = 'dsh-search-pro'
-export const inject = ['tools'] as const
+export const inject = ['tools', 'systemPrompt'] as const
 
 export interface Config {
   enabled: boolean
@@ -49,6 +56,8 @@ export interface Config {
   /** searxng 在单次聚合里的预算封顶（ms，默认 15000）——超时不拖住其它通道。 */
   searxngBudgetMs?: number
   cacheTtlMinutes?: number
+  /** 情报定时扫描间隔（分钟，默认 360 = 6 小时；0 = 关闭定时扫描，只保留手动 intel_scan）。 */
+  intelScanMinutes?: number
 }
 
 export const Config = z.object({
@@ -66,6 +75,7 @@ export const Config = z.object({
   searxngKeepAliveMinutes: z.number().default(120),
   searxngBudgetMs: z.number().default(15000),
   cacheTtlMinutes: z.number().default(60),
+  intelScanMinutes: z.number().default(360),
 })
 
 /** 单通道读数（工具结果里的 `channels[]`）——与 trace.ts 的 `channelsOf` 同形。 */
@@ -133,8 +143,83 @@ function renderShare(_a: any, v: any): any[] {
   }).join('\n') }]
 }
 
-export function apply(ctx: Context, config: Config): void {
-  const logger = ctx.logger('search-pro')
+/**
+ * 无损 JSON 化：DSH 工具返回值经校验，含 `undefined` 会报
+ * 「value is not lossless JSON」（2026-10-16 实测：status/mime 为 undefined 时触发）。
+ * 走一次 JSON 往返即把 undefined 字段剔除——这正是校验要求的语义。
+ */
+function jsonSafe<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v)) as T
+}
+
+/** 多源 URL 发现的渲染：源读数 + 附件单列（新增字段不渲染 = 等于没做） */
+function renderDiscover(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const st = v.stats ?? {}
+  const per = st.perSource ?? {}
+  const srcLine = Object.keys(per).length
+    ? Object.entries(per).map(([k, n]) => `${k}=${n}`).join(' · ')
+    : '(无源读数)'
+  const errLine = st.errorCount ? `\n⚠ 源错误 ${st.errorCount} 个：` + Object.entries(st.errors ?? {}).map(([k, m]) => `${k}: ${String(m).slice(0, 120)}`).join(' | ') : ''
+  const head = `# 多源 URL 发现：${v.domain}\n源读数：${srcLine}${errLine}\n共 ${st.total ?? 0} 条 · 其中附件 ${st.attachments ?? 0} 个 · 尝试 ${v.attempts ?? 0} 次 · ${v.elapsedMs ?? 0}ms`
+  const urls: any[] = v.results ?? []
+  const atts = urls.filter((r: any) => r.isAttachment)
+  const pages = urls.filter((r: any) => !r.isAttachment)
+  const pageBody = pages.slice(0, 60).map((r: any, i: number) => {
+    const meta = [r.source, r.status, r.mime].filter(Boolean).join(' ')
+    return `${i + 1}. ${r.url}${meta ? `\n   [${meta}]` : ''}`
+  }).join('\n')
+  const attBody = atts.slice(0, 40).map((r: any, i: number) => `${i + 1}. ${r.url}`).join('\n')
+  const parts = [head]
+  if (pages.length) parts.push(`\n## 页面（${pages.length}，显示前 ${Math.min(60, pages.length)}）\n${pageBody}`)
+  if (atts.length) parts.push(`\n## 附件（${atts.length}，显示前 ${Math.min(40, atts.length)}）—— 深网高价值目标\n${attBody}`)
+  if (!pages.length && !atts.length) parts.push('\n(无结果)')
+  return [{ type: 'text', text: parts.join('\n') }]
+}
+
+/** 站点发现的渲染：骨架四类 + sitemap 探测读数 */
+function renderSiteDiscover(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const s = v.site ?? {}
+  const st = s.stats ?? {}
+  const rob = s.robots ?? {}
+  const probes: any[] = s.sitemapProbes ?? []
+  const probeLine = probes.length
+    ? probes.map((p: any) => `${p.url.replace(/^https?:\/\//, '').split('/').slice(1).join('/') || '/'}=${p.ok ? `✓${p.bytes}B` : '✗'}`).join(' · ')
+    : '(未探测)'
+  const extLine = Object.keys(st.byExt ?? {}).length
+    ? Object.entries(st.byExt).map(([k, n]) => `${k}×${n}`).join(' · ')
+    : '无'
+  const cov: any = s.coverage ?? {}
+  const covLine = `覆盖度：${cov.confidence ?? '未知'}` + ((cov.basis ?? []).length ? `（${(cov.basis ?? []).join('；')}）` : '')
+  const head = [
+    `# 站点发现：${s.base}`,
+    `robots.txt: ${rob.ok ? '✓' : '✗ ' + (rob.error ?? '')} · 其中 sitemap 线索 ${(rob.sitemaps ?? []).length} 条 · Disallow ${(rob.disallow ?? []).length} 条`,
+    `sitemap 探测: ${probeLine}`,
+    `爬取: 成功 ${st.fetched ?? 0} 页 · 失败 ${st.failed ?? 0} 页 · 最大深度 ${st.maxDepthReached ?? 0}`,
+    `页面 ${(s.pages ?? []).length} · 附件 ${(s.attachments ?? []).length}（${extLine}）· feed ${(s.feeds ?? []).length}`,
+    covLine,
+  ].join('\n')
+  const parts = [head]
+  // 缺口清单紧跟头部（HALT 迁移：说清「没找到」与「找不到」的区别）
+  if ((cov.gaps ?? []).length) {
+    parts.push(
+      '\n## 覆盖缺口（诚实清单——分清「没找到」与「找不到」）\n' +
+        (cov.gaps as string[]).map((g, i) => `${i + 1}. ${g}`).join('\n'),
+    )
+  }
+  const atts: string[] = s.attachments ?? []
+  if (atts.length) parts.push(`\n## 附件清单（${atts.length}）—— 深网高价值目标\n` + atts.slice(0, 50).map((u, i) => `${i + 1}. ${u}`).join('\n'))
+  const feeds: string[] = s.feeds ?? []
+  if (feeds.length) parts.push(`\n## feed（${feeds.length}）\n` + feeds.slice(0, 10).map((u, i) => `${i + 1}. ${u}`).join('\n'))
+  const pages: string[] = s.pages ?? []
+  if (pages.length) parts.push(`\n## 页面（${pages.length}，显示前 40）\n` + pages.slice(0, 40).map((u, i) => `${i + 1}. ${u}`).join('\n'))
+  const errs: string[] = s.errors ?? []
+  if (errs.length) parts.push(`\n## 失败明细（前 10）\n` + errs.slice(0, 10).map((e, i) => `${i + 1}. ${String(e).slice(0, 160)}`).join('\n'))
+  return [{ type: 'text', text: parts.join('\n') }]
+}
+
+export function apply(ctx: Context, config: Config): void {  const logger = ctx.logger('search-pro')
   // tavilyKey 单一来源（2026-09-06 凭据迁移）：config 优先（兼容旧配置）→ .credentials.yaml refs 兜底。
   if (!config.tavilyKey) {
     try {
@@ -144,8 +229,109 @@ export function apply(ctx: Context, config: Config): void {
     } catch { /* 无凭据文件 */ }
   }
   const store = new SearchStore((config.cacheTtlMinutes ?? 60) * 60_000)
+  // 情报库：构造失败**不拖垮整个插件**（§5.24 逃逸异常 = 宿主死因）——降级成「情报工具响亮报错」
+  let intelStore: IntelStore | null = null
+  let intelInitError = ''
+  try {
+    intelStore = new IntelStore()
+  } catch (e) {
+    intelInitError = e instanceof Error ? e.message : String(e)
+    logger.warn(`intel store 初始化失败：${intelInitError}（情报工具将报错而非静默）`)
+  }
+  /** 情报工具的统一不可用读数：把「空」与「坏了」分开（§5.10 静默失败 = 死亡温床） */
+  const intelUnavailable = (): { ok: false; error: string } => ({
+    ok: false,
+    error: `情报库不可用：${intelInitError || '未知原因'}（库位置 ${join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'intel')}）`,
+  })
+
+  // ── 情报定时扫描（2026-10-16 · 让「情报系统」真的自己跑起来）──────────────
+  // 设计要点：
+  //  ① **到期检查而非直接定时**（§5.10 规则 2）：每分钟看一次「距上次扫描是否超间隔」，
+  //     这样重启不会吞掉一次扫描（重启后第一分钟内就会补扫）。
+  //  ② **状态落盘**：lastScanAt 写在 <DSH_HOME>/intel/status.json——它同时是到期判据的真源。
+  //  ③ **绝不反噬主流程**（§5.24 逃逸异常 = 宿主死因）：整体 try/catch，失败只 warn。
+  //  ④ unref()：不阻止进程退出。
+  //  ⑤ **扫描是取数不是决策**——推送与否归主体（本定时器不碰 telegram）。
+  const intelDir = intelStore?.dir ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'intel')
+  const intelStatusPath = join(intelDir, 'status.json')
+  const readIntelStatus = (): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(readFileSync(intelStatusPath, 'utf8')) as Record<string, unknown>
+    } catch {
+      return null // 「还没有状态文件」与「文件坏了」都不该拖垮调用方——由调用方按 null 处理
+    }
+  }
+  const writeIntelStatus = (patch: Record<string, unknown>): void => {
+    try {
+      writeFileSync(intelStatusPath, JSON.stringify({ ...(readIntelStatus() ?? {}), ...patch }, null, 1), 'utf8')
+    } catch (e) {
+      logger.warn(`情报状态写入失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  const runIntelScan = async (reason: string): Promise<void> => {
+    if (!intelStore) return
+    try {
+      if (intelStore.listTargets().length === 0) return
+      const t0 = Date.now()
+      const results = await scanAll(intelStore, { delayMs: 200 })
+      const summary = summarizeScans(results)
+      writeIntelStatus({
+        lastScanAt: new Date().toISOString(),
+        lastScanReason: reason,
+        lastScanMs: Date.now() - t0,
+        ...summary,
+      })
+      logger.info(
+        `情报定时扫描（${reason}）：${summary.scanned} 目标 · 扫到 ${summary.foundTotal}`
+        + ` · 新增 ${summary.newTotal} · 失败 ${summary.failedCount} · ${Date.now() - t0}ms`,
+      )
+    } catch (e) {
+      logger.warn(`情报定时扫描失败（${reason}）：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  const intelIntervalMinutes = config.intelScanMinutes ?? 360
+  if (intelStore && intelIntervalMinutes > 0) {
+    const intelTimer = setInterval(() => {
+      void (async () => {
+        try {
+          const st = readIntelStatus()
+          const last = st?.lastScanAt ? Date.parse(String(st.lastScanAt)) : 0
+          if (Number.isFinite(last) && Date.now() - last >= intelIntervalMinutes * 60_000) {
+            await runIntelScan('timer')
+          }
+        } catch (e) {
+          logger.warn(`情报到期检查失败：${e instanceof Error ? e.message : String(e)}`)
+        }
+      })()
+    }, 60_000)
+    intelTimer.unref?.()
+    logger.info(`情报定时扫描已装载：每 ${intelIntervalMinutes} 分钟（到期检查粒度 60s）`)
+  }
+
+  // ── 情报状态注入（2026-10-16）────────────────────────────────────────────
+  // 让「有未读情报」这件事**主动到达我**，而不是靠我每轮想起来查 intel_list。
+  // 机制：ctx.systemPrompt.context 的 text() 由 agent-loop 在**每次模型请求开头**物化。
+  // 纪律：**无未读时不注入**（省 token）；有未读时只给一行 + 两个可执行入口。
+  //       注入层绝不反噬主流程（§5.24）：整体 try/catch，失败返回空串。
+  const intelContextDispose = ctx.systemPrompt.context({
+    name: 'intel-status',
+    order: 850,
+    text: () => {
+      try {
+        if (!intelStore) return ''
+        const pending = intelStore.listItems({ status: 'new', limit: 1 }).filtered
+        if (pending === 0) return ''
+        const st = readIntelStatus()
+        const last = st?.lastScanAt ? localStamp(String(st.lastScanAt)) : '未扫过'
+        return `情报库：${pending} 条未读 · 上次扫描 ${last}（intel_digest 看内容 / intel_scan 立刻扫）`
+      } catch {
+        return ''
+      }
+    },
+  })
+  ctx.effect(() => intelContextDispose, 'search-pro.intel-context')
   // ── 自证轨迹（可维护性 S4 · 2026-09-14 批次 S4-A）────────────────────────────
-  // 单点收口：`reg` 是 **23 个工具的唯一注册入口**，故一个包装器覆盖整个工具面
+  // 单点收口：`reg` 是**全部工具的唯一注册入口**，故一个包装器覆盖整个工具面
   // （不在 N 处手改——漏一处就是新的观测盲区）。观测层零业务影响：
   // 返回值原样透出（output.schema 是 additionalProperties:false，绝不混入新字段）、
   // 业务异常原样重抛；落盘失败只吞不抛。
@@ -174,7 +360,12 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  const reg = (tool: any) => ctx.tools.register(defineTool({ ...tool, execute: tracedExecute(tool) } as any))
+  // 工具计数用现算而非写死：写死的数字必然漂移（2026-10-16 实测：日志报 23、实际 24）
+  let toolCount = 0
+  const reg = (tool: any) => {
+    toolCount += 1
+    return ctx.tools.register(defineTool({ ...tool, execute: tracedExecute(tool) } as any))
+  }
 
   // boot 行：字段与调用行完全同形（tail 后可直接读列）。
   searchTrace(composeSearchEntry({
@@ -749,11 +940,14 @@ export function apply(ctx: Context, config: Config): void {
     parameters: {},
     output: { schema: resultsSchema({ channels: { type: 'object', additionalProperties: true } }), render: renderList },
     async execute() {
-      const t = await torStatus().catch(() => ({ ok: false, detail: 'Tor 检查失败' }))
+      const t = await torStatus().catch(() => ({ ok: false, detail: 'Tor 检查失败', daemon: false, circuit: false }))
       const channels = store.countsSnapshot()
       const results = Object.entries(channels).map(([k, n]) => ({ title: k, url: '', snippet: `${n} 次调用` }))
       results.push({ title: '缓存', url: '', snippet: `${store.list().length} 条` })
-      results.push({ title: `Tor ${t.ok ? '✅' : '❌'}`, url: '', snippet: t.detail })
+      // 两级分别报：daemon(本地事实) 与 circuit(行为事实) —— 不许互相冒充
+      results.push({ title: `Tor daemon ${t.daemon ? '✅' : '❌'}`, url: '', snippet: t.daemon ? 'SocksPort 9050 在监听' : '无监听（daemon 未起）' })
+      results.push({ title: `Tor circuit ${t.circuit ? '✅' : '❌'}`, url: '', snippet: t.circuit ? `出网正常 · 出口 ${t.detail.split('出口 ')[1] ?? ''}` : 'daemon 在跑但出网失败（网桥/电路）' })
+      results.push({ title: `Tor 总判 ${t.ok ? '✅' : '❌'}`, url: '', snippet: t.detail })
       return { ok: true, count: results.length, results, channels }
     },
   })
@@ -779,5 +973,527 @@ export function apply(ctx: Context, config: Config): void {
     },
   })
 
-  logger.info(`applied · 23 tools · cache ${config.cacheTtlMinutes ?? 60}min`)
+  reg({
+    name: 'discover_urls',
+    description: '多源 URL 发现：从一个域名挖出互联网档案里的已知 URL——Common Crawl（PB 级网页档案，128 个月度索引）+ crt.sh 证书透明日志。用于「不知道有什么」时的广度发现：子域、历史页面、附件清单。无需 API key。',
+    parameters: {
+      domain: { type: 'string', required: true, description: '域名（如 sues.edu.cn；也吃 URL 形态）' },
+      sources: { type: 'array', description: '源：commoncrawl | crtsh | wayback（缺省 commoncrawl,crtsh；wayback 在大陆网络常被墙）' },
+      limit: { type: 'number', description: '每源取多少条（缺省 50；Common Crawl 实测 >50 稳定 504）' },
+      indexes: { type: 'array', description: 'Common Crawl 索引 id 列表（缺省最新一个；collinfo 共 128 个可选）' },
+      onlyAttachments: { type: 'boolean', description: '只返回附件类 URL（pdf/docx/xlsx/pptx/…）' },
+    },
+    output: {
+      schema: resultsSchema({
+        domain: { type: 'string' },
+        attempts: { type: 'number' },
+        elapsedMs: { type: 'number' },
+        stats: { type: 'object', additionalProperties: true },
+        perIndex: { type: 'object', additionalProperties: true },
+      }),
+      render: renderDiscover,
+    },
+    async execute(args: any) {
+      const r = await safe(() =>
+        discoverUrls(args.domain, { sources: args.sources, limit: args.limit, indexes: args.indexes }),
+      )
+      if (!r.ok) return { ok: false, error: r.error }
+      const v = r.value
+      const list = args.onlyAttachments ? v.attachments : v.urls
+      store.bump('discover_urls')
+      return jsonSafe({
+        ok: true,
+        count: list.length,
+        domain: v.domain,
+        attempts: v.attempts,
+        elapsedMs: v.elapsedMs,
+        stats: v.stats,
+        perIndex: v.perIndex,
+        results: list.map((u) => ({
+          url: u.url,
+          source: u.source,
+          status: u.status,
+          mime: u.mime,
+          isAttachment: isAttachment(u.url, u.mime),
+        })),
+      })
+    },
+  })
+
+  reg({
+    name: 'discover_site',
+    description: '站点级发现：给一个站点列出内容骨架——robots.txt / sitemap 探测 / 站内页面 / 附件清单 / feed。用于系统性遍历站点（替代人工翻列表页）：深网内容常藏在附件里（如公示公告的 docx/xlsx）。',
+    parameters: {
+      url: { type: 'string', required: true, description: '站点 URL（如 https://tw.sues.edu.cn/）' },
+      maxPages: { type: 'number', description: '最多访问页数（缺省 30，上界防爆炸）' },
+      maxDepth: { type: 'number', description: '最大爬取深度（缺省 3）' },
+      followPagination: { type: 'boolean', description: '是否跟随「下一页」分页链接（缺省 true）' },
+    },
+    output: {
+      schema: resultsSchema({ site: { type: 'object', additionalProperties: true } }),
+      render: renderSiteDiscover,
+    },
+    async execute(args: any) {
+      const r = await safe(() =>
+        discoverSite(args.url, {
+          maxPages: args.maxPages,
+          maxDepth: args.maxDepth,
+          followPagination: args.followPagination,
+        }),
+      )
+      if (!r.ok) return { ok: false, error: r.error }
+      store.bump('discover_site')
+      const s = r.value
+      return jsonSafe({
+        ok: true,
+        count: s.pages.length + s.attachments.length,
+        site: s,
+        results: [],
+      })
+    },
+  })
+
+  reg({
+    name: 'fetch_document',
+    description: '附件抽取：URL 或本地文件 → 统一文档模型（正文 + 结构化表格）。支持 docx/xlsx/pdf/xls/csv/tsv/html/txt。深网内容大量藏在附件里（公示公告的 docx/xlsx/pdf），本工具把附件变成可读文本。边界：扫描件 PDF 无文本层时只报 warnings（不做 OCR，未验证）；老式 .doc 需 antiword（本机 apt 依赖冲突未装上，会明确报出「暂不支持」）。',
+    parameters: {
+      url: { type: 'string', required: true, description: '附件 URL 或本地绝对路径' },
+      maxRows: { type: 'number', description: '表格行数上界（缺省 2000，防一次吐爆上下文）' },
+      timeoutMs: { type: 'number', description: '下载超时 ms（缺省 90000；大 PDF 实测需数十秒）' },
+    },
+    output: {
+      schema: resultsSchema({ doc: { type: 'object', additionalProperties: true } }),
+      render: renderDocument,
+    },
+    async execute(args: any) {
+      const r = await safe(() => fetchDocument(args.url, { maxRows: args.maxRows, timeoutMs: args.timeoutMs }))
+      if (!r.ok) return { ok: false, error: r.error }
+      store.bump('fetch_document')
+      return jsonSafe({ ok: true, count: 1, doc: r.value, results: [] })
+    },
+  })
+
+  // ── 情报系统（2026-10-16 · 主人指令：用提升后的搜索能力搭情报系统）────────────
+  // 四工具分工：watch=管目标 / scan=取增量 / list=查条目 / digest=出汇总。
+  // 增量判据的真源是**快照**：落盘与快照更新在 scanTarget 同一函数内，防调用方忘记。
+
+  reg({
+    name: 'intel_watch',
+    description: '情报监控目标管理：登记/列出/移除要持续监控的源（站点公告与附件、域名、arXiv 检索）。登记后用 intel_scan 扫描，只有**新增**条目会进 items 流。库位置 <DSH_HOME>/intel（targets.json + snapshots/ + items.jsonl）。',
+    parameters: {
+      action: { type: 'string', enum: ['add', 'list', 'remove', 'update'], description: 'add=登记（缺省） list=列出 remove=移除（快照一并清） update=改备注' },
+      id: { type: 'string', description: '目标 id（add 缺省自动生成；remove/update 必填）' },
+      kind: { type: 'string', enum: ['site', 'domain', 'arxiv'], description: 'add 必填：site=站点级发现（爬页面+附件） domain=多源 URL 发现（Common Crawl + crt.sh） arxiv=论文检索' },
+      url: { type: 'string', description: 'kind=site：站点 URL' },
+      domain: { type: 'string', description: 'kind=domain：域名' },
+      query: { type: 'string', description: 'kind=arxiv：检索词' },
+      note: { type: 'string', description: '备注（人读）' },
+      maxPages: { type: 'number', description: 'site/arxiv 的条数上界（缺省 site 30 / arxiv 15）' },
+      maxDepth: { type: 'number', description: 'site 最大爬取深度（缺省 3）' },
+    },
+    output: {
+      schema: resultsSchema({
+        targets: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        target: { type: 'object', additionalProperties: true },
+        dir: { type: 'string' },
+      }),
+      render: renderIntelWatch,
+    },
+    async execute(args: any) {
+      if (!intelStore) return intelUnavailable()
+      const s = intelStore
+      try {
+        const action = args.action ?? 'add'
+        if (action === 'list') {
+          const targets = s.listTargets()
+          return jsonSafe({ ok: true, count: targets.length, targets, dir: s.dir, results: [] })
+        }
+        if (action === 'remove') {
+          if (!args.id) return { ok: false, error: 'remove 需要 id' }
+          const done = s.removeTarget(args.id)
+          return { ok: done, count: 0, note: done ? `已移除 ${args.id}（快照一并清掉，重加不会继承旧快照）` : `未找到目标 ${args.id}`, results: [] }
+        }
+        if (action === 'update') {
+          if (!args.id) return { ok: false, error: 'update 需要 id' }
+          const done = s.patchTarget(args.id, args.note === undefined ? {} : { note: args.note })
+          return { ok: done, count: 0, note: done ? `已更新 ${args.id}` : `未找到目标 ${args.id}`, results: [] }
+        }
+        const kind = args.kind
+        if (kind !== 'site' && kind !== 'domain' && kind !== 'arxiv') {
+          return { ok: false, error: 'add 需要 kind（site | domain | arxiv）' }
+        }
+        const spec: IntelTarget['spec'] = {}
+        if (kind === 'site') {
+          if (!args.url) return { ok: false, error: 'kind=site 需要 url' }
+          spec.url = args.url
+          if (args.maxPages) spec.maxPages = args.maxPages
+          if (args.maxDepth) spec.maxDepth = args.maxDepth
+        } else if (kind === 'domain') {
+          if (!args.domain) return { ok: false, error: 'kind=domain 需要 domain' }
+          spec.domain = args.domain
+        } else {
+          if (!args.query) return { ok: false, error: 'kind=arxiv 需要 query' }
+          spec.query = args.query
+          if (args.maxPages) spec.maxPages = args.maxPages
+        }
+        const seed = String(spec.url ?? spec.domain ?? spec.query ?? '')
+        const id = args.id ?? `${kind}-${seed.replace(/[^\w.\-]+/g, '_').slice(0, 60)}`
+        const prev = s.getTarget(id)
+        // 重加时清快照——否则新目标「继承」旧快照会让增量判据失真（与 removeTarget 同理）
+        if (prev) s.clearSnapshot(id)
+        const target: IntelTarget = {
+          id, kind, spec,
+          note: args.note ?? prev?.note,
+          createdAt: prev?.createdAt ?? new Date().toISOString(),
+          lastScanAt: prev?.lastScanAt,
+          foundTotal: prev?.foundTotal,
+        }
+        s.upsertTarget(target)
+        return jsonSafe({
+          ok: true, count: 1, target,
+          note: prev ? `已覆盖 ${id}（快照已清，下次扫描按全新目标算）` : `已登记 ${id}`,
+          results: [],
+        })
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  })
+
+  reg({
+    name: 'intel_scan',
+    description: '扫描情报目标：按类型取数 → 与快照比对得出**增量** → 落盘 → 立即更新快照（报过的不会再报）。可扫一个（id）或全部。读数严格分型：state=ok 时 newCount 可为 0（真没新的）；state=failed 时 newCount 无意义（不许读成「0 条新增」）。',
+    parameters: {
+      id: { type: 'string', description: '目标 id（缺省=扫全部）' },
+      maxPages: { type: 'number', description: 'site 目标页数上界覆盖（缺省用目标自带值或 30）' },
+      delayMs: { type: 'number', description: '礼貌延迟 ms（缺省 150）' },
+    },
+    output: {
+      schema: resultsSchema({
+        scanned: { type: 'number' },
+        okCount: { type: 'number' },
+        failedCount: { type: 'number' },
+        foundTotal: { type: 'number' },
+        newTotal: { type: 'number' },
+        failedTargets: { type: 'array', items: { type: 'string' } },
+        failures: { type: 'array', items: { type: 'string' } },
+        partialCount: { type: 'number' },
+        partialTargets: { type: 'array', items: { type: 'string' } },
+        sourceErrors: { type: 'array', items: { type: 'string' } },
+        outcomes: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      }),
+      render: renderIntelScan,
+    },
+    async execute(args: any) {
+      if (!intelStore) return intelUnavailable()
+      const s = intelStore
+      try {
+        const opts = { maxPages: args.maxPages, delayMs: args.delayMs }
+        let results: Awaited<ReturnType<typeof scanAll>>
+        if (args.id) {
+          const t = s.getTarget(args.id)
+          if (!t) return { ok: false, error: `未找到目标 ${args.id}（用 intel_watch action=list 看现有目标）` }
+          results = [await scanTarget(t, s, opts)]
+        } else {
+          const all = s.listTargets()
+          if (all.length === 0) {
+            return jsonSafe({
+              ok: true, count: 0, note: '尚无监控目标——先用 intel_watch action=add 登记',
+              ...summarizeScans([]), outcomes: [], items: [], results: [],
+            })
+          }
+          results = await scanAll(s, opts)
+        }
+        const summary = summarizeScans(results)
+        const items = results.flatMap((r) => r.items)
+        // 手动扫也更新 status：否则定时器不知道刚扫过，会立刻重复扫一遍（浪费 + 对源站不礼貌）
+        writeIntelStatus({
+          lastScanAt: new Date().toISOString(),
+          lastScanReason: 'manual',
+          lastScanMs: results.reduce((s, r) => s + r.elapsedMs, 0),
+          ...summary,
+        })
+        store.bump('intel_scan')
+        return jsonSafe({
+          ok: true,
+          count: items.length,
+          ...summary,
+          outcomes: results.map((r) => ({
+            targetId: r.targetId, state: r.state, foundCount: r.foundCount, newCount: r.newCount,
+            error: r.error, confidence: r.confidence, gaps: r.gaps, elapsedMs: r.elapsedMs,
+            partial: r.partial, sourceErrors: r.sourceErrors,
+          })),
+          items,
+          results: [],
+        })
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  })
+
+  reg({
+    name: 'intel_list',
+    description: '列情报条目：按发现时间降序，可按目标/状态过滤，并带统计（总数 / 按状态 / 按类型 / 按目标）。items.jsonl 的坏行数会响亮报出（文件被外力破坏过时不静默）。可选把某条标为某状态（itemId + setStatus）。',
+    parameters: {
+      id: { type: 'string', description: '只看某目标' },
+      status: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '只看某状态' },
+      limit: { type: 'number', description: '条数上限（缺省 50）' },
+      itemId: { type: 'string', description: '（可选）要改状态的条目 id' },
+      setStatus: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '（可选）改成的状态——与 itemId 同传' },
+    },
+    output: {
+      schema: resultsSchema({
+        stats: { type: 'object', additionalProperties: true },
+        items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        badLines: { type: 'number' },
+        filtered: { type: 'number' },
+      }),
+      render: renderIntelList,
+    },
+    async execute(args: any) {
+      if (!intelStore) return intelUnavailable()
+      const s = intelStore
+      try {
+        if (args.itemId && args.setStatus) {
+          const done = s.updateStatus(args.itemId, args.setStatus)
+          return { ok: done, count: 0, note: done ? `${args.itemId} → ${args.setStatus}` : `未找到条目 ${args.itemId}`, results: [] }
+        }
+        const loaded = s.listItems({ targetId: args.id, status: args.status, limit: args.limit ?? 50 })
+        const stats = intelStats(s.loadItems().items, s.listTargets())
+        store.bump('intel_list')
+        return jsonSafe({
+          ok: true, count: loaded.items.length,
+          stats, items: loaded.items, badLines: loaded.badLines, filtered: loaded.filtered,
+          results: [],
+        })
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  })
+
+  reg({
+    name: 'intel_digest',
+    description: '出情报汇总文本：本轮该看的条目（按目标分组）+ 统计 + 扫描健康。本工具**只出文本**（发送由 telegram_send 执行——推送与否归主体裁决）。markSeen=true 时把列出的条目标为 seen，下次 digest 不再重复。',
+    parameters: {
+      limit: { type: 'number', description: '每目标最多几条（缺省 10）' },
+      status: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '取哪些状态（缺省 new）' },
+      markSeen: { type: 'boolean', description: '出完是否标 seen（缺省 false）' },
+    },
+    output: {
+      schema: resultsSchema({
+        digest: { type: 'string' },
+        stats: { type: 'object', additionalProperties: true },
+        shown: { type: 'number' },
+        marked: { type: 'number' },
+      }),
+      render: renderIntelDigest,
+    },
+    async execute(args: any) {
+      if (!intelStore) return intelUnavailable()
+      const s = intelStore
+      try {
+        const status = args.status ?? 'new'
+        const perTarget = args.limit ?? 10
+        const targets = s.listTargets()
+        const loaded = s.listItems({ status, limit: 500 })
+        const groups = new Map<string, any[]>()
+        for (const it of loaded.items) {
+          const arr = groups.get(it.targetId) ?? []
+          if (arr.length < perTarget) arr.push(it)
+          groups.set(it.targetId, arr)
+        }
+        const shown = [...groups.values()].reduce((n, a) => n + a.length, 0)
+        const stats = intelStats(s.loadItems().items, targets)
+        const lines: string[] = []
+        lines.push(`# 情报汇总 · ${localStamp(new Date())}`)
+        lines.push(`条目 ${stats.total} 条（${status} ${shown} 条待看）· 监控目标 ${stats.targets} 个`)
+        if (loaded.badLines > 0) lines.push(`⚠ items.jsonl 有 ${loaded.badLines} 行无法解析`)
+        const never = targets.filter((t) => !t.lastScanAt)
+        if (never.length) lines.push(`⚠ 未扫过的目标 ${never.length} 个：${never.map((t) => t.id).join(', ')}`)
+        if (shown === 0) {
+          lines.push('')
+          lines.push(targets.length === 0
+            ? '（尚无监控目标——intel_watch action=add 登记后再 scan）'
+            : `（无 ${status} 条目——扫过的都是已报过的，或还没扫）`)
+        }
+        for (const [tid, items] of groups) {
+          lines.push('')
+          lines.push(`## ${tid}（${items.length} 条）`)
+          for (const it of items) {
+            const tag = it.kind === 'attachment' ? '[附件]' : it.kind === 'paper' ? '[论文]' : '[页面]'
+            lines.push(`${tag} ${it.title || it.url}`)
+            if (it.title) lines.push(`   ${it.url}`)
+          }
+        }
+        let marked = 0
+        if (args.markSeen && shown > 0) {
+          for (const arr of groups.values()) for (const it of arr) if (s.updateStatus(it.id, 'seen')) marked += 1
+        }
+        store.bump('intel_digest')
+        return jsonSafe({ ok: true, count: shown, digest: lines.join('\n'), stats, shown, marked, results: [] })
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  })
+
+  logger.info(`applied · ${toolCount} tools · cache ${config.cacheTtlMinutes ?? 60}min`)
+}
+
+/** 附件抽取渲染：正文 + 表格（表格是深网最有价值的结构化内容，不能只算不渲染） */
+function renderDocument(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const d: any = v.doc ?? {}
+  const warns: string[] = d.warnings ?? []
+  const warnLine = warns.length ? '\n⚠ ' + warns.join(' | ') : ''
+  const text = String(d.text ?? '')
+  const head =
+    `# 附件抽取：${d.source}\n` +
+    `格式 ${d.kind} · ${((d.bytes ?? 0) / 1024).toFixed(1)}KB · 正文 ${text.length} 字 · ` +
+    `表格 ${(d.tables ?? []).length} 个 · ${d.elapsedMs ?? 0}ms（${d.via ?? '?'}）${warnLine}`
+  const parts = [head]
+  if (text) parts.push('\n## 正文\n' + text.slice(0, 3000) + (text.length > 3000 ? '\n…（截断）' : ''))
+  const tables: any[] = d.tables ?? []
+  tables.slice(0, 3).forEach((t: any, i: number) => {
+    let label = ''
+    let rows: any[] = []
+    if (Array.isArray(t)) {
+      label = `表 ${i + 1}`
+      rows = t
+    } else if (t && Array.isArray(t.rows)) {
+      label = `表 ${i + 1}「${t.sheet}」`
+      rows = t.rows
+    } else {
+      return
+    }
+    const body = rows
+      .slice(0, 15)
+      .map((r: any) => (Array.isArray(r) ? r.join(' | ') : String(r)))
+      .join('\n')
+    parts.push(`\n## ${label}（${rows.length} 行，显示前 ${Math.min(15, rows.length)}）\n${body}`)
+  })
+  if (tables.length > 3) parts.push(`\n… 另有 ${tables.length - 3} 个表未显示`)
+  return [{ type: 'text', text: parts.join('\n') }]
+}
+
+// ── 情报系统渲染（2026-10-16）─────────────────────────────────────────────
+// 纪律：新字段必须渲染出来——只算不渲染 = 等于没做（read 回来看不见）。
+
+/**
+ * 本地时间戳（2026-10-16 修）：此前 render 直接用 ISO（UTC）——本地 22:59 显示成 14:59，
+ * 差 8 小时且**没有任何标注**。**存 UTC 是对的，显示必须本地化**
+ * （§5.9 规则 6：进结论的读数必须自带范围标注）。
+ */
+function localStamp(iso: unknown): string {
+  const d = iso instanceof Date ? iso : new Date(String(iso ?? ''))
+  if (Number.isNaN(d.getTime())) return String(iso ?? '')
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** 目标渲染：目标是「我要盯什么」，故逐条列出 spec 与上次扫描时间 */
+function renderIntelWatch(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const lines: string[] = []
+  if (v.note) lines.push(v.note)
+  const ts: any[] = v.targets ?? []
+  if (ts.length) {
+    lines.push(`## 监控目标（${ts.length}）`)
+    for (const t of ts) {
+      const spec = t.spec?.url ?? t.spec?.domain ?? t.spec?.query ?? '?'
+      const last = t.lastScanAt ? `上次 ${localStamp(t.lastScanAt)}` : '未扫过'
+      const extra = t.spec?.maxPages ? ` · 上界 ${t.spec.maxPages}` : ''
+      lines.push(`· \`${t.id}\` [${t.kind}] ${spec}${extra} · ${last}${t.note ? ` · ${t.note}` : ''}`)
+    }
+  } else if (!v.target) {
+    lines.push('（尚无监控目标——用 intel_watch action=add 登记）')
+  }
+  if (v.dir) lines.push(`库位置：${v.dir}`)
+  return [{ type: 'text', text: lines.join('\n') }]
+}
+
+/** 扫描渲染：逐目标读数 + 失败清单 + 新增条目。「无新增」与「失败」分开说 */
+function renderIntelScan(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const partial = v.partialCount ? ` · ⚠部分源失败 ${v.partialCount}` : ''
+  const parts = [`# 情报扫描：${v.scanned} 个目标 · 成功 ${v.okCount} · 失败 ${v.failedCount}${partial} · 扫到 ${v.foundTotal} · 新增 ${v.newTotal}`]
+  if (v.note) parts.push(v.note)
+  const outs: any[] = v.outcomes ?? []
+  if (outs.length) {
+    parts.push('')
+    parts.push('## 逐目标读数')
+    for (const o of outs) {
+      const state = o.state === 'ok' ? '✅' : '❌'
+      parts.push(`· ${state} \`${o.targetId}\` 扫到 ${o.foundCount} · 新增 ${o.newCount} · ${o.elapsedMs}ms`)
+      if (o.error) parts.push(`  ⚠ ${o.error}`)
+      if (o.partial) parts.push('  ⚠ 部分源失败（扫到的是剩余源的结果，读数可能缩水）')
+      if (Array.isArray(o.sourceErrors)) {
+        for (const e of o.sourceErrors) parts.push(`    ✗ ${e}`)
+      }
+      if (o.confidence) parts.push(`  置信度 ${o.confidence}`)
+      if (Array.isArray(o.gaps) && o.gaps.length) {
+        // gaps **全显示**（2026-10-16 修）：此前只显示前 3 条，把「队列仍有 N 个未访问」
+        // 这类关键提示截掉了——而那正是「附件为 0」的原因所在。
+        for (const g of o.gaps) parts.push(`  缺口：${g}`)
+      }
+    }
+  }
+  const failures: string[] = v.failures ?? []
+  if (failures.length) {
+    parts.push('')
+    parts.push(`## ⚠ 失败（${failures.length}）`)
+    for (const f of failures) parts.push(`· ${f}`)
+  }
+  const items: any[] = v.items ?? []
+  if (items.length) {
+    parts.push('')
+    parts.push(`## 新增条目（${items.length}）`)
+    for (const it of items.slice(0, 20)) {
+      const tag = it.kind === 'attachment' ? '[附件]' : it.kind === 'paper' ? '[论文]' : '[页面]'
+      parts.push(`· ${tag} ${it.title || it.url}${it.source ? ` (${it.source})` : ''}`)
+    }
+    if (items.length > 20) parts.push(`… 另有 ${items.length - 20} 条`)
+  } else if (v.okCount > 0) {
+    parts.push('')
+    parts.push('（本轮无新增——扫到的都是已报过的）')
+  }
+  return [{ type: 'text', text: parts.join('\n') }]
+}
+
+/** 条目渲染：统计在头、条目在身、坏行响亮 */
+function renderIntelList(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const s: any = v.stats ?? {}
+  const parts = [`# 情报条目：${s.total ?? 0} 条 · 监控目标 ${s.targets ?? 0} 个`]
+  if (v.badLines) parts.push(`⚠ items.jsonl 有 ${v.badLines} 行无法解析（文件被外力破坏过）`)
+  const fmt = (o: any) => Object.entries(o ?? {}).map(([k, n]) => `${k} ${n}`).join(' · ')
+  const byStatus = fmt(s.byStatus)
+  const byKind = fmt(s.byKind)
+  if (byStatus) parts.push(`状态：${byStatus}`)
+  if (byKind) parts.push(`类型：${byKind}`)
+  const items: any[] = v.items ?? []
+  if (items.length) {
+    parts.push('')
+    parts.push(`## 条目（显示 ${items.length} · 命中 ${v.filtered ?? items.length}）`)
+    for (const it of items) {
+      const when = localStamp(it.foundAt)
+      parts.push(`· [${it.kind}/${it.status}] ${when} \`${it.targetId}\``)
+      if (it.title) parts.push(`  ${it.title}`)
+      parts.push(`  ${it.url}`)
+    }
+  } else {
+    parts.push('')
+    parts.push('（无匹配条目）')
+  }
+  return [{ type: 'text', text: parts.join('\n') }]
+}
+
+/** digest 渲染：文本即交付（可直接 telegram_send 推） */
+function renderIntelDigest(_a: any, v: any): any[] {
+  if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
+  const tail = v.marked ? `\n\n（已标记 ${v.marked} 条为 seen）` : ''
+  return [{ type: 'text', text: String(v.digest ?? '（空）') + tail }]
 }
