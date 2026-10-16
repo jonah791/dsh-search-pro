@@ -14,7 +14,8 @@
 import { httpGet, sleep } from './util.js'
 import {
   SEARCH_PATH_TEMPLATES, buildSearchUrl, looksLikeSearchResults, extractSeedTerms,
-  type SearchProbe, type SearchProbeState,
+  extractSearchForms, formToProbeUrl,
+  type SearchProbe, type SearchProbeState, type SearchForm,
 } from './discover-search.js'
 
 export interface SearchProbeOpts {
@@ -22,6 +23,8 @@ export interface SearchProbeOpts {
   probeTerm: string
   /** 首页 HTML（作基线：与首页几乎相同 ⇒ 查询词未生效） */
   baselineHtml?: string
+  /** ★ 页面里读到的搜索表单（**优先于路径模板**——2026-10-16 实测：盲猜路径两站全撞墙） */
+  forms?: SearchForm[]
   timeoutMs?: number
   maxTemplates?: number
   delayMs?: number
@@ -37,6 +40,10 @@ export interface ProbeOutcome {
 /**
  * 探测站点是否有可用的 GET 搜索接口。**命中即停**（省请求）。
  *
+ * 顺序（2026-10-16 实测驱动）：**① 页面里读到的表单**（已知事实，不猜）→ **② 常见路径模板**（兜底）。
+ * 实测教训：两个站盲猜路径全撞墙（上师大 **410**「已废弃」/ gov.cn **403**「禁止」）——
+ * 而页面自己的 `<form>` 是**已知事实**，不是猜测。
+ *
  * ⚠ 三态如实：`found`（有结构信号）/ `not-found`（明确否）/ `inconclusive`（请求失败或信号不足）
  *   —— 调用方**必须把三态透出**，不得把「没探测到」说成「没有搜索接口」。
  */
@@ -47,21 +54,36 @@ export async function probeSearchEndpoint(base: string, opts: SearchProbeOpts): 
   const probes: SearchProbe[] = []
   const errors: string[] = []
 
-  for (const template of SEARCH_PATH_TEMPLATES.slice(0, maxTemplates)) {
-    const url = buildSearchUrl(base, template, opts.probeTerm)
+  // ① 表单候选（页面里读到的，不猜）
+  const candidates: Array<{ template: string; url: string }> = []
+  for (const f of opts.forms ?? []) {
+    if (!f.likely) continue
+    const u = formToProbeUrl(f, opts.probeTerm)
+    if (u) candidates.push({ template: `form[${f.inputs[0]}]`, url: u })
+  }
+  const formCount = candidates.length
+  // ② 路径模板兜底
+  for (const t of SEARCH_PATH_TEMPLATES.slice(0, maxTemplates)) {
+    candidates.push({ template: t, url: buildSearchUrl(base, t, opts.probeTerm) })
+  }
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i]
+    if (!c) continue
+    const tag = i < formCount ? `form:${c.template}` : c.template
     let html = ''
     try {
-      html = await httpGet(url, { timeoutMs })
+      html = await httpGet(c.url, { timeoutMs })
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e)
-      errors.push(`${url}: ${reason}`)
-      probes.push({ template, url, state: 'inconclusive', reason: `请求失败：${reason.slice(0, 120)}` })
+      errors.push(`${c.url}: ${reason}`)
+      probes.push({ template: tag, url: c.url, state: 'inconclusive', reason: `请求失败：${reason.slice(0, 120)}` })
       continue
     }
     const verdict = looksLikeSearchResults(html, opts.probeTerm, opts.baselineHtml)
     const state: SearchProbeState = verdict.ok ? 'found' : 'not-found'
-    probes.push({ template, url, state, reason: verdict.reason })
-    if (verdict.ok) return { probes, hit: { template, url, html }, errors }
+    probes.push({ template: tag, url: c.url, state, reason: verdict.reason })
+    if (verdict.ok) return { probes, hit: { template: tag, url: c.url, html }, errors }
     await sleep(delayMs)
   }
   return { probes, errors }

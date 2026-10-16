@@ -22,7 +22,7 @@ import {
 } from './discover.js'
 import { fetchRobots, probeSitemaps, type SitemapProbe } from './discover-fetch.js'
 import { probeSearchEndpoint, expandViaSearch } from './discover-search-fetch.js'
-import { extractSeedTerms } from './discover-search.js'
+import { extractSeedTerms, extractSearchForms } from './discover-search.js'
 
 export interface SiteOpts {
   /** 最多访问多少页（上界，防爆炸） */
@@ -82,6 +82,12 @@ export interface SiteDiscovery {
     terms: string[]
     /** 从搜索结果页新发现的同源 URL 数（去重后） */
     expanded: number
+    /**
+     * 页面里读到的搜索表单（**证据链**：说明「为什么没探测到」——
+     * 「有 form 但 method=post」比「inconclusive」有用得多）。
+     * 2026-10-16 三站实测：上师大 POST 型 / gov.cn 无 action（JS 驱动）/ wikipedia 需组合参数。
+     */
+    forms: Array<{ action: string; method: string; inputs: string[]; likely: boolean; basis: string }>
   }
 }
 
@@ -292,6 +298,7 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
     reason: useSearch ? '尚未探测' : 'useSearch=false（调用方关闭）',
     terms: [],
     expanded: 0,
+    forms: [],
   }
   let searchDone = !useSearch
 
@@ -343,7 +350,12 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
       searchDone = true
       try {
         const probeTerm = extractSeedTerms(html, { limit: 1 })[0] ?? 'a'
-        const probe = await probeSearchEndpoint(base, { probeTerm, baselineHtml: homeHtml, timeoutMs })
+        // 页面里读到的搜索表单**优先于路径模板**（2026-10-16 实测：盲猜路径两站全撞墙）
+        const forms = extractSearchForms(html, url)
+        const probe = await probeSearchEndpoint(base, { probeTerm, baselineHtml: homeHtml, forms, timeoutMs })
+        searchResult.forms = forms.map((f) => ({
+          action: f.action, method: f.method, inputs: f.inputs, likely: f.likely, basis: f.basis,
+        }))
         if (probe.hit) {
           const exp = await expandViaSearch(base, html, {
             template: probe.hit.template,
@@ -366,7 +378,18 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
         } else {
           const last = probe.probes[probe.probes.length - 1]
           searchResult.state = probe.probes.some((p) => p.state === 'inconclusive') ? 'inconclusive' : 'not-found'
-          searchResult.reason = last ? last.reason : '无探测结果'
+          // ★ 把「为什么没探测到」说清楚（2026-10-16 三站实测驱动）：
+          //   上师大 = POST 型（论文边界内做不到）/ gov.cn = 无 action（JS 驱动）/ 其余 = 没读到表单
+          const postOnly = forms.length > 0 && forms.every((f) => f.method === 'post')
+          const likelyButNoGet = forms.some((f) => f.likely) && !forms.some((f) => f.likely && f.method === 'get')
+          const hint = postOnly
+            ? '（页面有搜索表单但是 **POST 型**——论文的结构性边界：只有 GET 可索引）'
+            : likelyButNoGet
+              ? '（页面有像搜索的表单，但没有可 GET 的文本输入框）'
+              : forms.length > 0
+                ? `（页面读到 ${forms.length} 个表单，但都不像搜索框）`
+                : '（页面里没读到任何含文本输入框的表单）'
+          searchResult.reason = (last ? last.reason : '无探测结果') + hint
         }
       } catch (e) {
         searchResult.state = 'inconclusive'

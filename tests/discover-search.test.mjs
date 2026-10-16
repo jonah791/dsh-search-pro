@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 
 import {
   SEARCH_PATH_TEMPLATES, stripTags, termsFromText, extractSeedTerms,
-  buildSearchUrl, looksLikeSearchResults,
+  buildSearchUrl, looksLikeSearchResults, extractSearchForms, formToProbeUrl,
 } from '../lib/discover-search.js'
 import { extractSameSiteLinks } from '../lib/discover-search-fetch.js'
 
@@ -113,4 +113,54 @@ test('extractSameSiteLinks：同源过滤 + 去重 + 去锚点 + 跨域剔除', 
 test('extractSameSiteLinks：退化输入（非法 base / 空 HTML）返回空数组，不抛', () => {
   assert.deepEqual(extractSameSiteLinks('<a href="/a">1</a>', 'https://x/', 'not-a-url'), [])
   assert.deepEqual(extractSameSiteLinks('', 'https://x/', 'https://x/'), [])
+})
+
+// ── 从页面读搜索表单（不猜路径 · 2026-10-16 实测驱动）────────────────────
+
+test('extractSearchForms：读出 GET 搜索表单的 action 与 input name', () => {
+  const html = '<form action="/search" method="get"><input type="text" name="q" placeholder="搜索..."><input type="submit" value="搜"></form>'
+  const forms = extractSearchForms(html, 'https://x.edu.cn/')
+  assert.equal(forms.length, 1)
+  assert.equal(forms[0].action, 'https://x.edu.cn/search')
+  assert.equal(forms[0].method, 'get')
+  assert.deepEqual(forms[0].inputs, ['q'])
+  assert.equal(forms[0].likely, true, 'placeholder 含「搜索」⇒ likely')
+  assert.ok(forms[0].basis.includes('搜索'), '依据要可复核')
+})
+
+test('★ extractSearchForms：POST 表单标出但**不产生 GET 探测 URL**（论文的结构性边界）', () => {
+  const html = '<form action="/s" method="post"><input type="text" name="kw" placeholder="检索"></form>'
+  const forms = extractSearchForms(html, 'https://x.edu.cn/')
+  assert.equal(forms[0].method, 'post')
+  assert.equal(formToProbeUrl(forms[0], '睡眠'), null, 'POST 不许拼成 GET URL（只有 GET 可索引）')
+})
+
+test('extractSearchForms：无文本输入框的表单被跳过（登录/隐藏域不可能是搜索）', () => {
+  const html = '<form action="/login"><input type="password" name="pw"><input type="hidden" name="t"></form>'
+  assert.deepEqual(extractSearchForms(html, 'https://x.edu.cn/'), [])
+})
+
+test('extractSearchForms：空 action ⇒ 用页面自身 URL；相对 action 被绝对化', () => {
+  const a = extractSearchForms('<form><input type="text" name="q"></form>', 'https://x.edu.cn/p')
+  assert.equal(a[0].action, 'https://x.edu.cn/p')
+  const b = extractSearchForms('<form action="s?"><input type="text" name="q"></form>', 'https://x.edu.cn/dir/p')
+  assert.equal(b[0].action, 'https://x.edu.cn/dir/s?')
+})
+
+test('extractSearchForms：无搜索语义词时 likely=false，但**仍报出**（不丢证据）', () => {
+  const forms = extractSearchForms('<form action="/find"><input type="text" name="a"></form>', 'https://x/')
+  assert.equal(forms[0].likely, false)
+  assert.ok(forms[0].basis.includes('无搜索语义词'))
+})
+
+test('formToProbeUrl：查询词被 URL 编码进第一个输入框名', () => {
+  const forms = extractSearchForms('<form action="/s" method="get"><input type="text" name="kw"></form>', 'https://x/')
+  const u = formToProbeUrl(forms[0], '睡眠 研究')
+  // ⚠ URLSearchParams 按 form-urlencoded 规范把**空格编码成 `+`**（不是 %20）——
+  // 两者在 query string 里都合法，实现用的是标准 API ⇒ 断言照实际规范写（判据别比实现严）。
+  assert.equal(u, 'https://x/s?kw=' + encodeURIComponent('睡眠 研究').replace(/%20/g, '+'))
+})
+
+test('formToProbeUrl：退化输入（无 inputs）返回 null，不抛', () => {
+  assert.equal(formToProbeUrl({ action: 'https://x/', method: 'get', inputs: [], likely: true, basis: '' }, 'a'), null)
 })

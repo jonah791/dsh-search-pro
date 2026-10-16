@@ -220,7 +220,16 @@ function renderSiteDiscover(_a: any, v: any): any[] {
     const tail = sr.terms && sr.terms.length
       ? ` · 种子词 ${(sr.terms as string[]).join('/')} · 新入队 ${sr.expanded ?? 0}`
       : ''
-    parts.push(`\n## 站内搜索接口\n${stateText[String(sr.state)] ?? String(sr.state)}${tail}\n  理由：${sr.reason ?? ''}`)
+    // 证据链：把「页面里读到了什么表单」也报出来——说明「为什么没探测到」
+    const forms: any[] = sr.forms ?? []
+    const formLine = forms.length
+      ? '\n  读到表单：' + forms.map((f: any) => {
+        const path = String(f.action ?? '').replace(/^https?:\/\/[^/]+/, '') || '/'
+        const inputs = Array.isArray(f.inputs) && f.inputs.length ? ` ← ${f.inputs.join(',')}` : ''
+        return `[${f.method}] ${path}${inputs}${f.likely ? '（像搜索）' : ''}`
+      }).join(' · ')
+      : ''
+    parts.push(`\n## 站内搜索接口\n${stateText[String(sr.state)] ?? String(sr.state)}${tail}\n  理由：${sr.reason ?? ''}${formLine}`)
   }
   const atts: string[] = s.attachments ?? []
   if (atts.length) parts.push(`\n## 附件清单（${atts.length}）—— 深网高价值目标\n` + atts.slice(0, 50).map((u, i) => `${i + 1}. ${u}`).join('\n'))

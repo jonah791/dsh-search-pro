@@ -205,3 +205,89 @@ export interface SearchProbe {
   state: SearchProbeState
   reason: string
 }
+
+// ── 从页面读搜索表单（不猜路径）────────────────────────────────────────
+//
+// 2026-10-16 实测驱动：两个站盲猜路径都撞墙（上师大 410「已废弃」/ gov.cn 403「禁止」），
+// 而**正路是读页面自己的 `<form>`**——这也更符合论文原意（Harnessing 说「只需判定输入框的
+// 数据类型」，即**假设已知输入框**，而不是猜 URL）。
+//
+// ⚠ POST 表单**标出来但不试**：论文的结构性边界——只有 GET 可索引。
+
+export interface SearchForm {
+  /** 绝对化的 action URL（空 action ⇒ 用页面自身 URL） */
+  action: string
+  method: 'get' | 'post'
+  /** 文本类输入框的 name（只有 GET 能拼进 URL） */
+  inputs: string[]
+  /** 是否像搜索框（表单文案/placeholder 含「搜索/检索/查询/search」） */
+  likely: boolean
+  /** 判成 likely 的依据（可复核，不写感觉） */
+  basis: string
+}
+
+/** 能承载关键词的文本类输入框 type */
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'q', 'keyword', 'query', ''])
+
+/**
+ * 从 HTML 提取搜索表单。
+ * · 只看**含文本输入框**的 form（没输入框的表单不可能是搜索）
+ * · action 相对路径绝对化；空 action ⇒ 用页面自身 URL
+ * · `likely` 判据：表单自身文本（含 placeholder）里出现搜索语义词
+ */
+export function extractSearchForms(html: string, pageUrl: string): SearchForm[] {
+  const forms: SearchForm[] = []
+  const formRe = /<form\b([^>]*)>([\s\S]*?)<\/form>/gi
+  let fm: RegExpExecArray | null
+  while ((fm = formRe.exec(html)) !== null && forms.length < 20) {
+    const attrs = fm[1] ?? ''
+    const inner = fm[2] ?? ''
+    const actionRaw = (/\baction\s*=\s*["']([^"']*)["']/i.exec(attrs)?.[1] ?? '').trim()
+    const methodRaw = (/\bmethod\s*=\s*["']([^"']*)["']/i.exec(attrs)?.[1] ?? 'get').trim().toLowerCase()
+    const method: 'get' | 'post' = methodRaw === 'post' ? 'post' : 'get'
+
+    const inputs: string[] = []
+    const inputRe = /<input\b([^>]*)>/gi
+    let im: RegExpExecArray | null
+    while ((im = inputRe.exec(inner)) !== null && inputs.length < 10) {
+      const ia = im[1] ?? ''
+      const type = (/\btype\s*=\s*["']([^"']*)["']/i.exec(ia)?.[1] ?? '').trim().toLowerCase()
+      if (!TEXT_INPUT_TYPES.has(type)) continue
+      const name = (/\bname\s*=\s*["']([^"']+)["']/i.exec(ia)?.[1] ?? '').trim()
+      if (name) inputs.push(name)
+    }
+    if (inputs.length === 0) continue
+
+    let action = ''
+    try {
+      action = actionRaw ? new URL(actionRaw, pageUrl).toString() : pageUrl
+    } catch {
+      continue
+    }
+
+    const placeholders = (inner.match(/placeholder\s*=\s*["']([^"']*)["']/gi) ?? []).join(' ')
+    const hit = /(搜索|检索|查询|站内搜|search|query|find)/i.exec(stripTags(inner) + ' ' + placeholders)
+    forms.push({
+      action,
+      method,
+      inputs,
+      likely: Boolean(hit),
+      basis: hit ? `表单文案含「${hit[0]}」` : '表单内无搜索语义词（仍可能是搜索框）',
+    })
+  }
+  return forms
+}
+
+/** 把表单拼成一个可 GET 的探测 URL（只支持 GET；POST 返回 null——论文的结构性边界） */
+export function formToProbeUrl(form: SearchForm, term: string): string | null {
+  if (form.method !== 'get') return null
+  const name = form.inputs[0]
+  if (!name) return null
+  try {
+    const u = new URL(form.action)
+    u.searchParams.set(name, term)
+    return u.toString()
+  } catch {
+    return null
+  }
+}
