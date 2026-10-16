@@ -1636,7 +1636,14 @@ function renderIntelScan(_a: any, v: any): any[] {
 }
 
 /** 条目渲染：统计在头、条目在身、坏行响亮 */
-function renderIntelList(_a: any, v: any): any[] {
+export function renderIntelList(_a: any, v: any): any[] {
+  // ⚠ note 必须**优先于** ok 判断（2026-10-17 线上实测抓出）：
+  // 改状态分支（单条/批量）返回的形状与「列条目」不同——只有 note，没有 stats/items。
+  // 不特判就会把「标记 3/3 条 → dropped」渲染成「# 情报条目：0 条 · 监控目标 0 个（无匹配条目）」
+  // ⇒ **执行正确而读数说「什么都没找到」**（与 kindTag 那次同型：新增返回形状没同步渲染层）。
+  // 且部分失败时 ok=false：若先判 ok 会走 error 分支显示「失败」，note 里的
+  // 「标记 2/3 条 · 未找到 1 条：xxx」会被整条丢掉。
+  if (v.note) return [{ type: 'text', text: `${v.ok ? '' : '⚠ '}${v.note}` }]
   if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
   const s: any = v.stats ?? {}
   const parts = [`# 情报条目：${s.total ?? 0} 条 · 监控目标 ${s.targets ?? 0} 个`]
