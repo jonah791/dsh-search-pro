@@ -28,7 +28,12 @@ export async function academicSemanticScholar(query: string, limit = 8): Promise
 }
 
 export async function academicArxiv(query: string, limit = 8): Promise<DeepResult[]> {
-  const xml = await httpGet(`http://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&max_results=${limit}`)
+  // 两处 2026-10-17 实测修正：
+  // ① **https 而非 http**——http 走一次重定向，慢且偶发失败（失败又被上层吞成空数组）
+  // ② **短语检索要加引号**——裸空格被 arxiv 解析成 OR：`self-improving agent`
+  //    实际查的是 `self-improving OR agent`（返回 105746 条，与意图完全不同）
+  const q = encodeURIComponent(`"${query}"`)
+  const xml = await httpGet(`https://export.arxiv.org/api/query?search_query=all:${q}&max_results=${limit}`)
   const entries = xml.split(/<entry>/i).slice(1)
   return entries.slice(0, limit).map((e) => {
     const title = stripTags(e.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '')
@@ -66,14 +71,30 @@ export async function academicOpenAlex(query: string, limit = 8): Promise<DeepRe
 export type AcademicSource = 'semantic' | 'arxiv' | 'crossref' | 'openalex'
 export const ACADEMIC_SOURCES: AcademicSource[] = ['semantic', 'arxiv', 'crossref', 'openalex']
 
-/** 学术检索：指定或全部源 */
-export async function searchAcademic(query: string, source?: AcademicSource, limit = 8): Promise<DeepResult[]> {
+/**
+ * 学术检索：指定或全部源。
+ *
+ * `onError` 是**必需的可观测面**（2026-10-17 实测驱动）：原先四个源一律
+ * `.catch(() => [])` ⇒ 源失败被读成「扫到 0 条 · state=ok」——**空与失败不分型**，
+ * 正是 §5.10 禁的形状（同一晚在情报系统别处修过同款：CC 504 静默缩水）。
+ * 现在失败带源名与原因上抛给调用方，由调用方决定报 partial 还是 failed。
+ */
+export async function searchAcademic(
+  query: string,
+  source?: AcademicSource,
+  limit = 8,
+  onError?: (source: AcademicSource, e: unknown) => void,
+): Promise<DeepResult[]> {
   const srcs = source ? [source] : ACADEMIC_SOURCES
   const jobs = srcs.map((s) => {
-    if (s === 'semantic') return academicSemanticScholar(query, limit).catch(() => [])
-    if (s === 'arxiv') return academicArxiv(query, limit).catch(() => [])
-    if (s === 'crossref') return academicCrossref(query, limit).catch(() => [])
-    return academicOpenAlex(query, limit).catch(() => [])
+    const fail = (e: unknown): DeepResult[] => {
+      onError?.(s, e)
+      return []
+    }
+    if (s === 'semantic') return academicSemanticScholar(query, limit).catch(fail)
+    if (s === 'arxiv') return academicArxiv(query, limit).catch(fail)
+    if (s === 'crossref') return academicCrossref(query, limit).catch(fail)
+    return academicOpenAlex(query, limit).catch(fail)
   })
   const settled = await Promise.all(jobs)
   return settled.flat()

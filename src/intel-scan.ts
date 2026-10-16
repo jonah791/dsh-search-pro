@@ -65,9 +65,13 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
   if (target.kind === 'arxiv') {
     const q = target.spec.query
     if (!q) return { found: [], error: 'arxiv 目标缺 spec.query' }
-    const rs = await searchAcademic(q, 'arxiv', target.spec.maxPages ?? 15)
+    // 源错误必须带出来（2026-10-17 实测：arxiv 失败曾被上层吞成「扫到 0 条 · state=ok」）
+    const errs: string[] = []
+    const rs = await searchAcademic(q, 'arxiv', target.spec.maxPages ?? 15, (s, e) => {
+      errs.push(`${s}: ${e instanceof Error ? e.message : String(e)}`)
+    })
     const found = rs.map((r) => ({ url: r.url, title: r.title, source: 'arxiv' }))
-    return { found }
+    return { found, sourceErrors: errs }
   }
   if (target.kind === 'api') {
     const url = target.spec.url
