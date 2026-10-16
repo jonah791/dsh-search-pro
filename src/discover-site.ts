@@ -21,6 +21,8 @@ import {
   type DiscoveredUrl,
 } from './discover.js'
 import { fetchRobots, probeSitemaps, type SitemapProbe } from './discover-fetch.js'
+import { probeSearchEndpoint, expandViaSearch } from './discover-search-fetch.js'
+import { extractSeedTerms } from './discover-search.js'
 
 export interface SiteOpts {
   /** 最多访问多少页（上界，防爆炸） */
@@ -39,6 +41,10 @@ export interface SiteOpts {
   maxPerColumn?: number
   /** 最多入队多少个不同栏目（缺省 12；防「进入栏目」吃光预算、内容页饿死） */
   maxColumns?: number
+  /** 是否探测站内搜索接口并用种子词扩展 URL 前沿（缺省 true；Harnessing the Deep Web 迁移） */
+  useSearch?: boolean
+  /** 搜索扩展用的种子词上限（缺省 5——论文：URL 数 ∝ 库大小而非查询组合数，**不穷举**） */
+  maxSearchTerms?: number
 }
 
 export interface SiteDiscovery {
@@ -61,6 +67,22 @@ export interface SiteDiscovery {
   errors: string[]
   /** 覆盖度自评（见 assessCoverage） */
   coverage: SiteCoverage
+  /**
+   * 站内搜索探测与种子词扩展的读数（Harnessing the Deep Web 迁移）。
+   * **三态如实**：found（有结构信号）/ not-found（明确否）/ inconclusive（请求失败或信号不足）
+   * ——「没探测到」不许说成「没有搜索接口」。
+   */
+  search: {
+    enabled: boolean
+    /** 探测到的搜索接口模板（未探测到为 null） */
+    template: string | null
+    state: 'found' | 'not-found' | 'inconclusive' | 'skipped'
+    reason: string
+    /** 实际用的种子词 */
+    terms: string[]
+    /** 从搜索结果页新发现的同源 URL 数（去重后） */
+    expanded: number
+  }
 }
 
 /**
@@ -259,6 +281,19 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
   let fetched = 0
   let failed = 0
   let maxDepthReached = 0
+  // 站内搜索扩展状态（Harnessing the Deep Web 迁移）：爬到几页后再触发——种子词才有内容
+  const useSearch = opts.useSearch !== false
+  const maxSearchTerms = opts.maxSearchTerms ?? 5
+  let homeHtml = ''
+  const searchResult: SiteDiscovery['search'] = {
+    enabled: useSearch,
+    template: null,
+    state: useSearch ? 'not-found' : 'skipped',
+    reason: useSearch ? '尚未探测' : 'useSearch=false（调用方关闭）',
+    terms: [],
+    expanded: 0,
+  }
+  let searchDone = !useSearch
 
   // ① robots.txt
   const robots = await fetchRobots(base)
@@ -301,6 +336,44 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
       continue
     }
     pages.add(url)
+    if (depth === 0 && !homeHtml) homeHtml = html
+
+    // ④ 站内搜索扩展（Harnessing the Deep Web 迁移）：爬满 5 页后做一次，**只做一次**
+    if (!searchDone && fetched >= 5) {
+      searchDone = true
+      try {
+        const probeTerm = extractSeedTerms(html, { limit: 1 })[0] ?? 'a'
+        const probe = await probeSearchEndpoint(base, { probeTerm, baselineHtml: homeHtml, timeoutMs })
+        if (probe.hit) {
+          const exp = await expandViaSearch(base, html, {
+            template: probe.hit.template,
+            maxTerms: maxSearchTerms,
+            timeoutMs,
+          })
+          let queued = 0
+          for (const u of exp.urls) {
+            if (seen.has(u)) continue
+            if (!isSameSite(u, base) || isJunk(u) || isAttachment(u)) continue
+            queue.push({ url: u, depth: depth + 1 })
+            queued++
+          }
+          searchResult.template = probe.hit.template
+          searchResult.state = 'found'
+          searchResult.reason = `探测命中：${probe.hit.template}`
+          searchResult.terms = exp.terms
+          searchResult.expanded = queued
+          for (const e of exp.errors) errors.push(`search: ${e}`)
+        } else {
+          const last = probe.probes[probe.probes.length - 1]
+          searchResult.state = probe.probes.some((p) => p.state === 'inconclusive') ? 'inconclusive' : 'not-found'
+          searchResult.reason = last ? last.reason : '无探测结果'
+        }
+      } catch (e) {
+        searchResult.state = 'inconclusive'
+        searchResult.reason = `探测异常：${e instanceof Error ? e.message : String(e)}`
+        errors.push(`search: ${searchResult.reason}`)
+      }
+    }
 
     const found = extractDiscoveryLinks(html, url)
     for (const s of found.sitemaps) sitemapUrls.push(s)
@@ -391,6 +464,7 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
     stats: { fetched, failed, maxDepthReached, byExt },
     errors,
     coverage,
+    search: searchResult,
   }
 }
 

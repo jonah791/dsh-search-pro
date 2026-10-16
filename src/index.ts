@@ -208,6 +208,20 @@ function renderSiteDiscover(_a: any, v: any): any[] {
         (cov.gaps as string[]).map((g, i) => `${i + 1}. ${g}`).join('\n'),
     )
   }
+  // 站内搜索探测读数（Harnessing the Deep Web 迁移）——三态如实，不许把「没探测到」说成「没有」
+  const sr: any = s.search ?? {}
+  if (sr.enabled) {
+    const stateText: Record<string, string> = {
+      found: `✅ 命中 \`${sr.template}\``,
+      'not-found': '未发现（探测的模板都没给出结果结构信号）',
+      inconclusive: '⚠ 不确定（请求失败或信号不足）',
+      skipped: '已跳过',
+    }
+    const tail = sr.terms && sr.terms.length
+      ? ` · 种子词 ${(sr.terms as string[]).join('/')} · 新入队 ${sr.expanded ?? 0}`
+      : ''
+    parts.push(`\n## 站内搜索接口\n${stateText[String(sr.state)] ?? String(sr.state)}${tail}\n  理由：${sr.reason ?? ''}`)
+  }
   const atts: string[] = s.attachments ?? []
   if (atts.length) parts.push(`\n## 附件清单（${atts.length}）—— 深网高价值目标\n` + atts.slice(0, 50).map((u, i) => `${i + 1}. ${u}`).join('\n'))
   const feeds: string[] = s.feeds ?? []
