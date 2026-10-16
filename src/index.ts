@@ -1567,11 +1567,16 @@ function localStamp(iso: unknown): string {
 }
 
 /** 目标渲染：目标是「我要盯什么」，故逐条列出 spec 与上次扫描时间 */
-function renderIntelWatch(_a: any, v: any): any[] {
+export function renderIntelWatch(_a: any, v: any): any[] {
   if (!v.ok) return [{ type: 'text', text: v.error ?? '失败' }]
   const lines: string[] = []
   if (v.note) lines.push(v.note)
   const ts: any[] = v.targets ?? []
+  // ⚠ 判据必须是「这是不是**列表响应**」，不能只看 `!v.target`（2026-10-17 线上实测抓出）：
+  // remove/add/update 分支返回的形状只有 note（**不返回 target，也不返回 targets**），
+  // 于是 `ts=[]` 且 `!v.target` 同时成立 ⇒ 渲染出「（尚无监控目标——用 intel_watch action=add 登记）」，
+  // 而实际还有 5 个目标 —— **读数说数据没了，数据还在**（与 renderIntelList 那次同型）。
+  const isListResponse = Array.isArray(v.targets)
   if (ts.length) {
     lines.push(`## 监控目标（${ts.length}）`)
     for (const t of ts) {
@@ -1580,7 +1585,7 @@ function renderIntelWatch(_a: any, v: any): any[] {
       const extra = t.spec?.maxPages ? ` · 上界 ${t.spec.maxPages}` : ''
       lines.push(`· \`${t.id}\` [${t.kind}] ${spec}${extra} · ${last}${t.note ? ` · ${t.note}` : ''}`)
     }
-  } else if (!v.target) {
+  } else if (isListResponse && !v.target) {
     lines.push('（尚无监控目标——用 intel_watch action=add 登记）')
   }
   if (v.dir) lines.push(`库位置：${v.dir}`)
