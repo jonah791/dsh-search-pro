@@ -12,6 +12,7 @@ import {
   diffNew,
   classifyItem,
   isStructuralPage,
+  isHighValue,
   isIntelWorthy,
   normalizeItem,
   intelStats,
@@ -218,4 +219,44 @@ test('isIntelWorthy：不传 opts 时按「非基线」处理（向后兼容旧�
 test('isIntelWorthy：协议文件与非 http 仍被拦（原有判据不退化）', () => {
   assert.equal(isIntelWorthy('https://a.b/robots.txt'), false)
   assert.equal(isIntelWorthy('not-a-url'), false)
+})
+
+// ── api 源（声明式 JSON 端点 · 2026-10-17）──────────────────────────────
+//
+// 存在理由：大量高价值源是 JSON API（实测币安公告端点公开可用），而网页形态是 SPA。
+// 关键判据：api 条目是**声明式精选**（itemsPath 指向的就是「公告列表」这类目标集合），
+// 不受基线判据限制——否则首次扫描的公告会被当页面全丢掉（判据比对象严）。
+
+test('★ classifyItem：api 源判为 api；附件判据优先于 api（pdf 仍是附件）', () => {
+  assert.equal(classifyItem('https://x/a/1', undefined, 'api'), 'api')
+  assert.equal(classifyItem('https://x/a/1.pdf', undefined, 'api'), 'attachment', '附件是更强的信号（文件类型明确）')
+  assert.equal(classifyItem('https://x/a/1', undefined, 'crawl'), 'page')
+})
+
+test('★ isHighValue：单一真源——三类高价值，page/unknown 不是', () => {
+  assert.equal(isHighValue('attachment'), true)
+  assert.equal(isHighValue('paper'), true)
+  assert.equal(isHighValue('api'), true)
+  assert.equal(isHighValue('page'), false)
+  assert.equal(isHighValue('unknown'), false)
+})
+
+test('★★ 尸体样本：api 源首次扫描（基线）必须放行——漏了豁免这条就挂', () => {
+  // 币安公告的真实形态：文章页 URL，非附件非结构页
+  const announce = 'https://www.binance.com/en/support/announcement/e52ef13311eb4e1a96f07099152e61d5'
+  assert.equal(
+    isIntelWorthy(announce, { isBaseline: true, source: 'api' }),
+    true,
+    'api 条目是声明式精选，不是站点地图噪音——基线判据不适用',
+  )
+  // 对照组：同一 URL 来自 crawl 时，基线期必须被拦（证明豁免确实只对 api 生效）
+  assert.equal(
+    isIntelWorthy(announce, { isBaseline: true, source: 'crawl' }),
+    false,
+    '对照组：crawl 源的页面在基线期仍必须被拦——否则豁免写宽了',
+  )
+})
+
+test('isIntelWorthy：结构页即使来自 api 源也被拦（豁免没有写宽）', () => {
+  assert.equal(isIntelWorthy('https://x/list.htm', { isBaseline: true, source: 'api' }), false)
 })

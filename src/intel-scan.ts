@@ -11,6 +11,7 @@
 import { discoverSite } from './discover-site.js'
 import { discoverUrls } from './discover-fetch.js'
 import { searchAcademic } from './deep.js'
+import { mapApiItems } from './intel-api.js'
 import { diffNew, isIntelWorthy, normalizeItem, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
 import type { IntelStore } from './intel-store.js'
 
@@ -68,7 +69,36 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
     const found = rs.map((r) => ({ url: r.url, title: r.title, source: 'arxiv' }))
     return { found }
   }
-  return { found: [], error: `暂不支持的 target.kind: ${target.kind}（当前支持 site / domain / arxiv）` }
+  if (target.kind === 'api') {
+    const url = target.spec.url
+    if (!url) return { found: [], error: 'api 目标缺 spec.url' }
+    const itemsPath = target.spec.itemsPath
+    if (!itemsPath) return { found: [], error: 'api 目标缺 spec.itemsPath（声明式路径映射，如 data.catalogs.0.articles）' }
+    try {
+      const res = await fetch(url, {
+        headers: { 'user-agent': 'Mozilla/5.0 (compatible; alice-intel/1.0)', accept: 'application/json,*/*' },
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (!res.ok) return { found: [], sourceErrors: [`api: HTTP ${res.status} ${res.statusText}`] }
+      const json: unknown = await res.json()
+      const mapped = mapApiItems(json, {
+        url,
+        itemsPath,
+        ...(target.spec.idPath ? { idPath: target.spec.idPath } : {}),
+        ...(target.spec.titlePath ? { titlePath: target.spec.titlePath } : {}),
+        ...(target.spec.urlTemplate ? { urlTemplate: target.spec.urlTemplate } : {}),
+      })
+      return {
+        found: mapped.items,
+        // 结构性失败 ⇒ 源级故障（让读数可见）；跳过计数 ⇒ 覆盖缺口（不误报「源在坏」）
+        sourceErrors: mapped.errors.map((e) => `api: ${e}`),
+        gaps: mapped.notes.map((e) => `api: ${e}`),
+      }
+    } catch (e) {
+      return { found: [], sourceErrors: [`api: ${e instanceof Error ? e.message : String(e)}`] }
+    }
+  }
+  return { found: [], error: `暂不支持的 target.kind: ${target.kind}（当前支持 site / domain / arxiv / api）` }
 }
 
 /**
@@ -108,8 +138,11 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
   // 先看快照是否为空——决定这次是不是**首次基线扫描**（基线只收高价值类）
   const known = store.loadSnapshot(target.id)
   const isBaseline = known.size === 0
-  // 过滤掉不该进情报库的（协议文件 / 结构页 / 基线期的普通页面），再与快照比
-  const worthy = collected.found.filter((f) => isIntelWorthy(f.url, { isBaseline }))
+  // 过滤掉不该进情报库的（协议文件 / 结构页 / 基线期的普通页面），再与快照比。
+  // source 必须传下去：api 源是声明式精选，不受基线判据限制（否则首次扫描的公告全被丢）
+  const worthy = collected.found.filter((f) =>
+    isIntelWorthy(f.url, { isBaseline, ...(f.source ? { source: f.source } : {}) }),
+  )
   const fresh = diffNew(worthy, known)
 
   const now = new Date().toISOString()

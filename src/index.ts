@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, isStructuralPage, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, isStructuralPage, isHighValue, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -349,11 +349,12 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         // 分层读数（2026-10-16 实测驱动）：161 条未读里 118 条是页面噪音
         // ⇒ 「N 条未读」这个数字**没有分辨力**——信噪比必须进读数本身，
         // 否则我看到「160 条未读」会以为有大量情报，实际高价值的只有几十条。
-        const high = unread.filter((i) => i.kind === 'attachment' || i.kind === 'paper').length
+        // 判据走 isHighValue（单一真源）：新增高价值 kind 时只改一处。
+        const high = unread.filter((i) => isHighValue(i.kind)).length
         const low = unread.length - high
         const st = readIntelStatus()
         const last = st?.lastScanAt ? localStamp(String(st.lastScanAt)) : '未扫过'
-        return `情报库：${high} 条高价值未读（附件/论文）+ ${low} 条页面 · 上次扫描 ${last}（intel_digest 看内容 / intel_scan 立刻扫）`
+        return `情报库：${high} 条高价值未读（附件/论文/api）+ ${low} 条页面 · 上次扫描 ${last}（intel_digest 看内容 / intel_scan 立刻扫）`
       } catch {
         return ''
       }
@@ -1115,13 +1116,28 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
     parameters: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'update'], description: 'add=登记（缺省） list=列出 remove=移除（快照一并清） update=改备注' },
       id: { type: 'string', description: '目标 id（add 缺省自动生成；remove/update 必填）' },
-      kind: { type: 'string', enum: ['site', 'domain', 'arxiv'], description: 'add 必填：site=站点级发现（爬页面+附件） domain=多源 URL 发现（Common Crawl + crt.sh） arxiv=论文检索' },
-      url: { type: 'string', description: 'kind=site：站点 URL' },
+      kind: {
+        type: 'string',
+        enum: ['site', 'domain', 'arxiv', 'api'],
+        description:
+          'add 必填：site=站点级发现（爬页面+附件） domain=多源 URL 发现（Common Crawl + crt.sh） arxiv=论文检索 api=声明式 JSON 端点（填 itemsPath 等路径映射，不写代码就能加源）',
+      },
+      url: { type: 'string', description: 'kind=site/api：站点或 JSON 端点 URL' },
       domain: { type: 'string', description: 'kind=domain：域名' },
       query: { type: 'string', description: 'kind=arxiv：检索词' },
       note: { type: 'string', description: '备注（人读）' },
       maxPages: { type: 'number', description: 'site/arxiv 的条数上界（缺省 site 30 / arxiv 15）' },
       maxDepth: { type: 'number', description: 'site 最大爬取深度（缺省 3）' },
+      itemsPath: {
+        type: 'string',
+        description: 'kind=api：条目数组的点路径（支持数字索引），如 data.catalogs.0.articles',
+      },
+      idPath: { type: 'string', description: 'kind=api：id 字段名（缺省 id）' },
+      titlePath: { type: 'string', description: 'kind=api：标题字段名（缺省 title）' },
+      urlTemplate: {
+        type: 'string',
+        description: 'kind=api：条目链接模板（{字段名} 占位），如 https://www.binance.com/en/support/announcement/{code}',
+      },
     },
     output: {
       schema: resultsSchema({
@@ -1151,8 +1167,8 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           return { ok: done, count: 0, note: done ? `已更新 ${args.id}` : `未找到目标 ${args.id}`, results: [] }
         }
         const kind = args.kind
-        if (kind !== 'site' && kind !== 'domain' && kind !== 'arxiv') {
-          return { ok: false, error: 'add 需要 kind（site | domain | arxiv）' }
+        if (kind !== 'site' && kind !== 'domain' && kind !== 'arxiv' && kind !== 'api') {
+          return { ok: false, error: 'add 需要 kind（site | domain | arxiv | api）' }
         }
         const spec: IntelTarget['spec'] = {}
         if (kind === 'site') {
@@ -1163,6 +1179,17 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         } else if (kind === 'domain') {
           if (!args.domain) return { ok: false, error: 'kind=domain 需要 domain' }
           spec.domain = args.domain
+        } else if (kind === 'api') {
+          // 声明式：url + itemsPath 是必需，其余路径字段可选（缺省 id/title，无模板则用 id 当 URL）
+          if (!args.url) return { ok: false, error: 'kind=api 需要 url（JSON 端点）' }
+          if (!args.itemsPath) {
+            return { ok: false, error: 'kind=api 需要 itemsPath（条目数组的点路径，如 data.catalogs.0.articles）' }
+          }
+          spec.url = args.url
+          spec.itemsPath = args.itemsPath
+          if (args.idPath) spec.idPath = args.idPath
+          if (args.titlePath) spec.titlePath = args.titlePath
+          if (args.urlTemplate) spec.urlTemplate = args.urlTemplate
         } else {
           if (!args.query) return { ok: false, error: 'kind=arxiv 需要 query' }
           spec.query = args.query
@@ -1331,11 +1358,12 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const perTarget = args.limit ?? 10
         const targets = s.listTargets()
         const loaded = s.listItems({ status, limit: 500 })
-        // 价值优先（informativeness test 迁移 · 2026-10-16）：附件/论文排在页面之前——
+        // 价值优先（informativeness test 迁移 · 2026-10-16）：高价值类排在页面之前——
         // 同一目标里「新附件」的信息量远高于「新页面」，不排序时页面会淹掉附件。
-        const VALUE: Record<string, number> = { attachment: 0, paper: 0, page: 2, unknown: 3 }
+        // 判据走 isHighValue（单一真源）：新增高价值 kind 时只改一处。
+        const rank = (k: string): number => (isHighValue(k) ? 0 : k === 'page' ? 2 : 3)
         const ranked = loaded.items.slice().sort((a, b) => {
-          const d = (VALUE[a.kind] ?? 3) - (VALUE[b.kind] ?? 3)
+          const d = rank(a.kind) - rank(b.kind)
           return d !== 0 ? d : String(b.foundAt).localeCompare(String(a.foundAt))
         })
         const groups = new Map<string, any[]>()
@@ -1346,7 +1374,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         }
         const shown = [...groups.values()].reduce((n, a) => n + a.length, 0)
         const stats = intelStats(s.loadItems().items, targets)
-        const highShown = [...groups.values()].flat().filter((i) => i.kind === 'attachment' || i.kind === 'paper').length
+        const highShown = [...groups.values()].flat().filter((i) => isHighValue(i.kind)).length
         const lines: string[] = []
         lines.push(`# 情报汇总 · ${localStamp(new Date())}`)
         lines.push(`条目 ${stats.total} 条（${status} ${shown} 条待看，其中高价值 ${highShown} 条）· 监控目标 ${stats.targets} 个`)
@@ -1364,7 +1392,11 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           lines.push('')
           lines.push(`## ${tid}（${items.length} 条）`)
           for (const it of items) {
-            const tag = it.kind === 'attachment' ? '[附件]' : it.kind === 'paper' ? '[论文]' : '[页面]'
+            const tag =
+              it.kind === 'attachment' ? '[附件]'
+              : it.kind === 'paper' ? '[论文]'
+              : it.kind === 'api' ? '[公告]'
+              : '[页面]'
             lines.push(`${tag} ${it.title || it.url}`)
             if (it.title) lines.push(`   ${it.url}`)
           }

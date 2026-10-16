@@ -20,8 +20,8 @@ export interface IntelItem {
   /** 来自哪个监控目标 */
   targetId: string
   url: string
-  /** 条目类型：附件与网页分开（深网价值在附件） */
-  kind: 'page' | 'attachment' | 'paper' | 'unknown'
+  /** 条目类型：attachment/paper/api 是高价值（信息载体），page 是站点结构（低） */
+  kind: 'page' | 'attachment' | 'paper' | 'api' | 'unknown'
   /** 标题（源提供时） */
   title?: string
   /** 发现时间（ISO） */
@@ -36,10 +36,29 @@ export interface IntelItem {
 /** 监控目标 */
 export interface IntelTarget {
   id: string
-  /** site=站点级发现；domain=多源 URL 发现；arxiv=论文检索 */
-  kind: 'site' | 'domain' | 'arxiv'
-  /** 目标规格：site/domain 用 url；arxiv 用 query */
-  spec: { url?: string; domain?: string; query?: string; maxPages?: number; maxDepth?: number }
+  /** site=站点级发现；domain=多源 URL 发现；arxiv=论文检索；api=声明式 JSON 端点 */
+  kind: 'site' | 'domain' | 'arxiv' | 'api'
+  /**
+   * 目标规格：site/domain 用 url；arxiv 用 query；api 用 url + 路径映射。
+   *
+   * api 的路径映射是**声明式**的——加一个 JSON 源只需填字段，不写代码
+   * （2026-10-17：实测币安公告端点公开可用，而网页形态是 SPA 爬不到）。
+   */
+  spec: {
+    url?: string
+    domain?: string
+    query?: string
+    maxPages?: number
+    maxDepth?: number
+    /** api：条目数组的点路径（支持数字索引），如 `data.catalogs.0.articles` */
+    itemsPath?: string
+    /** api：id 字段名（缺省 id） */
+    idPath?: string
+    /** api：标题字段名（缺省 title） */
+    titlePath?: string
+    /** api：条目链接模板（`{字段名}` 占位），如 `https://x/{code}` */
+    urlTemplate?: string
+  }
   note?: string
   createdAt: string
   /** 上次扫描时间（ISO） */
@@ -81,12 +100,26 @@ export function diffNew<T extends { url: string }>(found: T[], known: Iterable<s
   return out
 }
 
-/** 条目分类：附件 / 论文 / 网页 / 未知 */
+/** 条目分类：附件 / 论文 / api / 网页 / 未知（附件判据最强，优先） */
 export function classifyItem(url: string, mime?: string, source?: string): IntelItem['kind'] {
-  if (source === 'arxiv') return 'paper'
   if (isAttachment(url, mime)) return 'attachment'
+  if (source === 'arxiv') return 'paper'
+  if (source === 'api') return 'api'
   if (/^https?:\/\//i.test(url)) return 'page'
   return 'unknown'
+}
+
+/**
+ * 高价值类判据（**单一真源**）：附件（信息载体）/ 论文（新知识）/ api（声明式精选）。
+ *
+ * 抽出来的理由：这个判断至少被三处用到（状态注入分层 / digest 价值排序 / 基线豁免）。
+ * 三处各写一遍 = 三处会漂移——新增一个高价值 kind 时必然漏改其中一处。
+ *
+ * 参数取 `string` 而非联合类型：调用方（如 digest 的排序）拿到的是宽松类型，
+ * 收窄在这里发生一次即可——不让每个调用点都写类型断言。
+ */
+export function isHighValue(kind: string): boolean {
+  return kind === 'attachment' || kind === 'paper' || kind === 'api'
 }
 
 /**
@@ -124,22 +157,31 @@ export interface WorthyOpts {
    * 附件与论文例外——它们本身就是信息载体，首次发现即有价值。
    */
   isBaseline?: boolean
+  /**
+   * 候选的来源通道。
+   *
+   * `api` 是**声明式精选**（itemsPath 指向的就是「公告列表」这类目标集合），
+   * 不是站点地图噪音 ⇒ 不受基线判据限制（2026-10-17）。
+   * 若不给 source，api 源首次扫描的条目会被当页面全部丢掉——那是判据比对象严。
+   */
+  source?: string
 }
 
 /**
  * 该 URL 是否值得进情报库。
  *
- * 三层判据（2026-10-16 升级）：① 非 http(s) / 协议文件 ⇒ 否
+ * 四层判据：① 非 http(s) / 协议文件 ⇒ 否
  * ② 结构页 ⇒ **永远否**（容器不是内容，与是否基线无关）
- * ③ 基线扫描 ⇒ 只有 attachment / paper 算情报
+ * ③ api 源 ⇒ **是**（声明式精选，不受基线限制）
+ * ④ 基线扫描 ⇒ 只有高价值类（attachment / paper）算情报
  */
 export function isIntelWorthy(url: string, opts: WorthyOpts = {}): boolean {
   if (!/^https?:\/\//i.test(url)) return false
   if (isMetaFile(url)) return false
   if (isStructuralPage(url)) return false
+  if (opts.source === 'api') return true
   if (opts.isBaseline) {
-    const kind = classifyItem(url)
-    return kind === 'attachment' || kind === 'paper'
+    return isHighValue(classifyItem(url))
   }
   return true
 }
