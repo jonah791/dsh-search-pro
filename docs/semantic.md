@@ -60,12 +60,14 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 3. **I3 全量内存态**：缓存与配额不落盘——重启 web 后 `search_cache action=list` 必为空（可用一次重启判真假）。⚠ **情报库是例外**（I6–I10 那套落盘在 `<DSH_HOME>/intel/`，跨重启保留——这正是情报系统的存在前提）。
 4. **I4 输出必过 schema**：每个工具 `output.schema` 的 `additionalProperties:false` 生效，多字段即校验失败（`schema-test.mjs` 输出 `validate violations: NONE` 可判）。
 5. **I5 缺配置即显式拒绝**：`search_serp`(tavily/serper)、`lookup_dns_history`、`search_shodan` 在无 key 时返回固定文案 `未配置 <key>（Config）`，不静默降级。
-6. **I6 结构页永远不是情报**（`isStructuralPage`）：拦 `list`/`index`/`default`/`more`/`search`/`column`/`category`/`tag` **+ 数字后缀**（`list2.htm`/`list231.htm` 是分页列表页——漏判过一次，线上抓出）+ 根路径 + 目录结尾。**容器不是内容，与是否基线无关**。
+6. **I6 结构页永远不是情报**（`isStructuralPage`）：拦容器词 `list`/`index`/`default`/`more`/`search`/`column`/`category`/`tag`/`nav`/`menu` **+ 数字/下划线/连字符后缀**（`[\d_-]*`）+ 根路径 + 目录结尾。**扩展名一律通配，不枚举**——⚠ 两次同型漏判都出在这里：① 正则只匹配 `list.htm` ⇒ 分页列表页 `list2.htm` 漏判进库；② 扩展名写死 `htm|html|php|jsp|aspx?|shtml` ⇒ sues 站的 `list222.psp` 漏判进库。**枚举式判据注定在命名空间扩张时静默失效**（容器词是信息架构产物、稳定；扩展名是技术栈产物、层出不穷）。**容器不是内容，与是否基线无关**。
 7. **I7 基线扫描只收高价值类**：快照为空（首次扫描）时只有 `attachment` / `paper` / `api` 进库——站点「本来就有这些页面」不是新闻。实测对照：修复前首扫产 118 条页面；修复后另一站首扫产 9 条**全是附件**、零页面。
 8. **I8 快照记「全部候选」，worthy 记「其中值得报的」**：两者必须分开——只记 worthy 会让被过滤的那些在下一轮「变成新的」。实测：候选 9→16（多了 7 个页面），新增仍 0。
 9. **I9 空与失败必须分型**：`state` 三态（ok / partial / failed）与 `sourceErrors` **正交**——「扫到 0 条」与「源坏了」不许都渲染成 0；源级错误必须带目标归属（`<targetId>: <原因>`）。⚠ 上游 `searchAcademic` 曾一律 `.catch(() => [])` 把源失败吞成空数组（2026-10-17 修：`onError` 回调上抛）。
 10. **I10 读数分层**：`shown`（本次列出，受 per-target 限制）与 `filtered`（未读合计）必须分开说——「new 15 条待看」在未读 72 条时会被读成「只有 15 条未读」。
 11. **I11 新增 kind 时渲染走单一真源**：`kindTag(kind)` 是标签唯一来源；`index.ts` 里**不得出现硬编码标签字面量**（有结构断言测试拦）。理由：加 `api` kind 时改了一处渲染、漏了另一处 ⇒ 币安公告显示成 `[页面]`，**读数失真而没有任何报错**。
+12. **I12 分支返回形状必须与渲染层同步**：同一工具的 `execute` 可能有**多种返回形状**（如 `intel_list` 的「列条目」与「改状态」），渲染层必须**按形状分支**，不能一律按默认形状渲染。⚠ 2026-10-17 一晚两次同型：① `intel_list` 批量改状态返回 `{ok,count,note}` ⇒ 渲染成「0 条 · 无匹配条目」（**执行正确而读数说没找到**）；② `intel_watch` 的 remove/add 同样不返回 `targets` ⇒ 渲染成「（尚无监控目标）」（**读数说数据没了，数据还在**）。判据两条：**note 存在时优先渲染 note**（部分失败时 `ok=false`，若先判 ok 会走 error 分支、note 里的「未找到 N 条」整条丢掉）；**「空」的判据必须是「这是列表响应且为空」**（`Array.isArray(v.targets)`），不能是 `!v.target`——**缺字段 ≠ 空**。
+13. **I13 arxiv 查询必须表达式化，且语法字符不得编码**：① `arxivQuery(raw)`——裸空格被 arxiv 当 **OR**（实测 `deep web crawling hidden web` 的 20 条里强相关仅 2 条 / 10%、无关 15 条 / 75%）⇒ 多词逐词 `all:` + `AND` 连接；已含语法（`ti:`/`abs:`/引号/括号/布尔）**原样透传**，代码不替调用者改写意图。② `encodeArxivQuery(q)`——**不能用 `encodeURIComponent`**：`:` 是字段前缀的语法成分，编成 `%3A` 后 arxiv 不认前缀、**回退全文检索**（实测 3/3 返回无关论文）；空格按官方形态用 `+`。依据：官方手册 §5.1（示例 `search_query=au:del_maestro+AND+ti:checkerboard`）。
 
 ## 4 · 契约
 
@@ -207,6 +209,10 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A32 | **渲染走单一真源**（I11） | `npm test` → 结构断言「`index.ts` 不得含硬编码标签字面量」+ `kindTag` 四类映射 + 未知兜底；**该断言已用尸体注入验证有区分力**（注入 `'[附件]'` ⇒ 红；撤销 ⇒ 绿） | **已实测（2026-10-17）** |
 | A33 | **声明式 JSON API 源可用**（第 4 类 kind） | 线上：币安公告端点 `扫到 20 · 新增 20`（279ms，`[公告]` 标签正确）；`npm test` → `tests/intel-api.test.mjs` 12 例（**真实响应样本** + itemsPath 配错响亮报错 + 模板字段缺失跳过计数 + 非数组报实际类型 + 跳过与故障分离） | **已实测（2026-10-17）** |
 | A34 | **判据升级后存量能跟上** | `intel_prune` 干跑 → apply → 注入读数精确变化（76→41 页面、6→35 页面两次）；工具**软标记可逆**（append `status=dropped` + `meta.droppedReason`，再 append `new` 即恢复） | **已实测（2026-10-17）** |
+| A35 | **分支返回形状与渲染层同步**（I12） | `npm test` → `tests/render-intel-list.test.mjs` + `tests/render-intel-watch.test.mjs`，各含**尸体样本**（批量 note / remove note 不得渲染成「0 条」「尚无监控目标」）与**反向锁**（真的空列表必须仍报那句——判据不许修过头）；线上互证：批量 drop 15 条 ⇒ `标记 15/15 条 → dropped`（此前渲染成「0 条 · 无匹配条目」），情报库 85→70 与操作一致；add ⇒ 「已登记 arxiv-deepweb」（此前误报「尚无监控目标」，而 list 仍报 5 个目标） | **已实测（2026-10-17）** |
+| A36 | **结构页判据的扩展名通配**（I6） | `npm test` → `isStructuralPage` 线上样本新增 `list222.psp`/`list231.psp`（sues 站实抓）；**反向注入**：旧正则（扩展名白名单）对两条 `.psp` 判 `false`、新判据判 `true`，两条真内容页两者一致 ⇒ 测试有区分力；线上：`intel_prune` 干跑精确命中 2 条，apply 后未读页面 35→33 | **已实测（2026-10-17）** |
+| A37 | **arxiv 查询构造**（I13） | `npm test` → `tests/arxiv-query.test.mjs` 8 例（含 3 具尸体样本：裸空格必产 AND / 冒号绝不被编码 / 重复词去重）；线上：错误信息带出构造后的 URL `search_query=all:deep+AND+all:web+AND+all:crawling+AND+all:hidden`（冒号保留、空格 `+`、去重生效）。⚠ **「结果质量」未验证**——限速 429 挡住（见 U18） | **部分实测（2026-10-17）** |
+| A38 | **情报时间窗**（推送场景） | `npm test` → `tests/intel-store.test.mjs` 4 例（时间窗 / 尸体样本「foundAt 坏值不算最近新增」/ 与状态·目标过滤 AND 叠加 / 坏值退化不退化成空）；线上：`intel_digest sinceHours=1` ⇒ 全量 110 条 → **16 条**（列出 6），读数含「时间窗：最近 1 小时」 | **已实测（2026-10-17）** |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 
@@ -321,6 +327,8 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **U15（新，2026-10-17）「表单之后的深网」无人覆盖**：本轮读的 12 篇论文**没有一篇处理表单提交之后的深网**——那正是 Harnessing the Deep Web（CIDR 2009）的原始命题，也是我缺的那块。当前 `discover_site` 只做 GET 探测。
 - **U16（新，2026-10-17）情报推送未实测**：`intel_digest` 出文本 + telegram 发送是**两个独立动作**（推送与否归主体裁决，见 §1 反定位）。判据已写进技能 `deep-web-discovery`（高价值新增 + 有时效性 + 非睡眠时段），但**一次真实推送都没做过**（深夜不宜打扰）⇒ 早间汇总时验证。
 - **U17（新，2026-10-17）`.doc` 抽取未验证**：`antiword` 因 apt 依赖冲突未装上，`extract_document.py` **如实报「未验证」**（不假装能读）。老式 `.doc` 在政府/高校站点常见，是覆盖缺口而非已知不可行。
+- **U18（新，2026-10-17）arxiv 修复后的「结果质量」未验证**：I13 的编码修复**请求形态已线上验证**（错误信息带出构造后的 URL，冒号保留 / 空格 `+` / 去重生效），但**「返回的论文是否真的相关」没验**——限速 429 挡住了（本机 IP 当晚连打 8+ 次，单次 429 响应耗时 16.2s）。⚠ 附带发现（已登记任务板 `t-2dfb92b5`）：429 响应慢时会**撞 `httpGet` 超时**，于是「被限速」被读成「超时」（`This operation was aborted`）——**归因方向被误导**。⇒ 待限速窗口过后重扫一次，用「新条目相关性」作为判据（旧 20 条的污染率 75% 是基准线）。
+- **U19（新，2026-10-17）`intel_watch` 改不了 spec——监控源无法演进**：`action=update` 只改 `note`，改不了 `query` / `url` / `maxPages` / `itemsPath`。想改 query 就只能 `remove` + `add`，而 `add` 会**清快照**（正确，否则增量判据失真）⇒ **代价是丢 `foundTotal` 与历史**。本轮就是这么处理 `arxiv-deepweb` 的（旧 20 条几乎全是垃圾，删了重建反而是净收益）——但那是**运气**，不是判据。⇒ 待做：`update` 支持可选 `spec`（部分合并 + 按 kind 校验必填项），且**改 spec 时显式报出「快照已清」**。已登记任务板 `t-e6ecec0a`。
 
 - **U2 缓存淘汰只清过期项**：`set()` 在 `size > 500` 时仅删 `expiresAt` 已过的键；高活跃会话可超 500 条常驻。
 - **U3 `SearchStore` 作用域**：实例在 `apply()` 内创建——单 web 进程内多会话是否共享同一实例（→ 缓存/配额是否跨会话串味）待实测确认；确认后回写本节。
