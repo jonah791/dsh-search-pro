@@ -1,21 +1,30 @@
-# 语义文档：dsh-search-pro（深度搜索 · 三层检索 / 24 工具）
+# 语义文档：dsh-search-pro（深度搜索 · 三层检索 + 发现/情报层 / 32 工具）
 
 > 能力名：`dsh-search-pro` · 主副本路径：`self-plugins/dsh-search-pro/docs/semantic.md`
-> 实现落点：`self-plugins/dsh-search-pro/src/index.ts`（+ `src/engines.ts` `src/deep.ts` `src/robust.ts` `src/share.ts` `src/osint.ts` `src/store.ts` `src/fetch.ts` `src/archive.ts` `src/buildQuery.ts` `src/util.ts` **`src/research.ts`**）
-> 版本：v0.1.0（package.json） · 2026-09-18 复核 · 作者：爱丽丝 · 状态：**implemented**
+> 实现落点：`self-plugins/dsh-search-pro/src/index.ts`（+ `src/engines.ts` `src/deep.ts` `src/robust.ts` `src/share.ts` `src/osint.ts` `src/store.ts` `src/fetch.ts` `src/archive.ts` `src/buildQuery.ts` `src/util.ts` **`src/research.ts`** **`src/discover.ts` `src/discover-fetch.ts` `src/discover-site.ts` `src/discover-search.ts` `src/discover-search-fetch.ts` `src/document.ts` `src/intel.ts` `src/intel-api.ts` `src/intel-store.ts` `src/intel-scan.ts`**）
+> 版本：v0.1.0（package.json） · 2026-10-17 复核 · 作者：爱丽丝 · 状态：**implemented**
 > 开发方式：语义文档优先（先写清「是什么/什么关系/怎么裁决」，再让实现逼近，最后用实践回修）
 
 ---
 
 ## 1 · 定位与反定位
 
-**定位**：给我一套「检索 + 抓取」工具面（**24 个** `search_*` / `fetch_*` / `archive_*` / `lookup_*` / `enum_*` 工具）， 覆盖三层——L1 表层多引擎（**含 2026-09-18 新增的无钥匙 `parallel` 与自托管 `searxng`**）、L2 深网与 OSINT、L3 Tor/反爬抓取—— 并统一输出外壳 `{ ok, count, results, error?, note? }`；**`search_deep`（2026-09-18）**在其上提供「一句话交付带引用报告」的深研循环。
+**定位**：给我一套「检索 + 抓取 + **持续发现**」工具面（**32 个**工具），覆盖**五个层次**：
+
+- **L1 表层多引擎**（`search_*`）——含 2026-09-18 新增的无钥匙 `parallel` 与自托管 `searxng`
+- **L2 深网与 OSINT**——学术 / 专利 / GitHub / 社区 / WHOIS / 子域
+- **L3 Tor 与反爬降级抓取**（`fetch_*` / `archive_*`）
+- **L4 发现层**（2026-10-16 新增 · `discover_urls` / `discover_site`）——把能力从「搜一个已知问题」扩到「**系统性发现一个源有什么**」：多源 URL 发现（Common Crawl 128 个月度索引 + crt.sh 证书透明）+ 站点级骨架（robots / sitemap 探测 / 有界 BFS / 附件清单 / 站内搜索探测），带**覆盖度自评**（找到什么 / 缺什么 / 多可信）。核心判据：**发现是瓶颈，不是抽取**（主人 2026-10-16 定调）
+- **L5 抽取层 + 情报系统**（2026-10-16/17 新增）——`fetch_document`（附件 → 文本 + 表格，WSL Python 载体，零安装成本）；`intel_*` ×5（监控源 → 定期扫描 → **只报新的** → 结构化沉淀 → 状态主动注入）。判据见 §3 不变量 I6–I10
+
+并统一输出外壳 `{ ok, count, results, error?, note? }`；**`search_deep`** 在其上提供「一句话交付带引用报告」的深研循环。
 
 
 **反定位（本文不管什么）**：
 - 不管**内容判断**（结果该不该信、够不够用）——那是调用者（我）的裁决，本插件只做**取回与结构化**
 - 不管**凭据的生命周期**（key 的签发/轮换/落盘）——`config` 与 `.credentials.yaml` 只是**读取方**
 - 不管**红队渗透流程**（目录爆破/CVE 匹配/敏感路径）——那属于 `dsh-red-team`（8 个 `red_*` 工具）
+- **不做情报推送**（2026-10-17 明确）：情报系统只**准备内容**（`intel_digest` 出文本）与**送达信号**（状态注入），**推送与否归主体裁决**——自动推送会违反 §2.4「机制把信号送达，不代替决策」
 - **不是**搜索引擎本体（无自有索引；全是第三方公开端点/HTML 解析的组合）
 - **不是**沙箱：工具面 = 能力面，不是权限边界（见 §5）
 
@@ -46,11 +55,17 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 ```
 
 不变量（invariants）：
-1. **I1 工具数恒为 23**：`src/index.ts` 内 `reg({...})` 调用点计数 = 23；`apply-test.mjs` 打印 `REGISTERED: 23` 可判真假。
+1. **I1 工具数恒为 32**：`src/index.ts` 内 `reg({...})` 调用点计数 = 32（2026-10-17 现算：grep `^    name: '` 得 33 命中，减去注入名 `intel-status` 一条）；`apply-test.mjs` 打印 `REGISTERED: N` 可判真假。
 2. **I2 execute 不向外抛**：所有 `execute` 经 `safe()` 包裹，失败恒返回 `{ ok:false, error:string }`（`search_quota` 内部 `torStatus().catch` 同款兜底）。
-3. **I3 全量内存态**：缓存与配额不落盘——重启 web 后 `search_cache action=list` 必为空（可用一次重启判真假）。
+3. **I3 全量内存态**：缓存与配额不落盘——重启 web 后 `search_cache action=list` 必为空（可用一次重启判真假）。⚠ **情报库是例外**（I6–I10 那套落盘在 `<DSH_HOME>/intel/`，跨重启保留——这正是情报系统的存在前提）。
 4. **I4 输出必过 schema**：每个工具 `output.schema` 的 `additionalProperties:false` 生效，多字段即校验失败（`schema-test.mjs` 输出 `validate violations: NONE` 可判）。
 5. **I5 缺配置即显式拒绝**：`search_serp`(tavily/serper)、`lookup_dns_history`、`search_shodan` 在无 key 时返回固定文案 `未配置 <key>（Config）`，不静默降级。
+6. **I6 结构页永远不是情报**（`isStructuralPage`）：拦 `list`/`index`/`default`/`more`/`search`/`column`/`category`/`tag` **+ 数字后缀**（`list2.htm`/`list231.htm` 是分页列表页——漏判过一次，线上抓出）+ 根路径 + 目录结尾。**容器不是内容，与是否基线无关**。
+7. **I7 基线扫描只收高价值类**：快照为空（首次扫描）时只有 `attachment` / `paper` / `api` 进库——站点「本来就有这些页面」不是新闻。实测对照：修复前首扫产 118 条页面；修复后另一站首扫产 9 条**全是附件**、零页面。
+8. **I8 快照记「全部候选」，worthy 记「其中值得报的」**：两者必须分开——只记 worthy 会让被过滤的那些在下一轮「变成新的」。实测：候选 9→16（多了 7 个页面），新增仍 0。
+9. **I9 空与失败必须分型**：`state` 三态（ok / partial / failed）与 `sourceErrors` **正交**——「扫到 0 条」与「源坏了」不许都渲染成 0；源级错误必须带目标归属（`<targetId>: <原因>`）。⚠ 上游 `searchAcademic` 曾一律 `.catch(() => [])` 把源失败吞成空数组（2026-10-17 修：`onError` 回调上抛）。
+10. **I10 读数分层**：`shown`（本次列出，受 per-target 限制）与 `filtered`（未读合计）必须分开说——「new 15 条待看」在未读 72 条时会被读成「只有 15 条未读」。
+11. **I11 新增 kind 时渲染走单一真源**：`kindTag(kind)` 是标签唯一来源；`index.ts` 里**不得出现硬编码标签字面量**（有结构断言测试拦）。理由：加 `api` kind 时改了一处渲染、漏了另一处 ⇒ 币安公告显示成 `[页面]`，**读数失真而没有任何报错**。
 
 ## 4 · 契约
 
@@ -81,20 +96,25 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 |-------|------------------|------|
 | cordis 组合 | `.dsh/profiles/web/cordis.patch.yml:166`（`id: agent-search-pro` / `name: dsh-search-pro` / `config.tavilyKey`，值不落文档） | web 启动装配 |
 | cordis 装配 | `src/index.ts:apply(ctx, config)`（`export const inject = ['tools']`） | 插件挂载时 |
-| 工具注册 | `src/index.ts:reg()` → `ctx.tools.register(defineTool(tool))` | `apply()` 内同步 23 次 |
-| 我（模型/会话） | 23 个 `execute(args)`（`search_build_query` … `search_cache`） | 每次工具调用 |
+| 工具注册 | `src/index.ts:reg()` → `ctx.tools.register(defineTool(tool))` | `apply()` 内同步 **32** 次 |
+| 我（模型/会话） | **32** 个 `execute(args)`（`search_build_query` … `intel_prune`） | 每次工具调用 |
 | 缓存/配额 | `src/index.ts` 各 execute → `store.get/set/bump`（`src/store.ts:SearchStore`） | 每次工具调用 |
 | 凭据兜底 | `src/index.ts:apply` → `readFileSync(join($DSH_HOME ?? ~/.dsh, '.credentials.yaml'))` 正则 `TAVILY_API_KEY` | 仅当 `config.tavilyKey` 为空 |
 | WSL + Tor | `src/fetch.ts:fetchTor` / `src/fetch.ts:torStatus`（`wsl.exe -d Ubuntu -- bash -lc curl --socks5-hostname 127.0.0.1:9050`） | `fetch_tor` / `search_quota` |
 | WSL curl（BTDig） | `src/share.ts:curlGet`（`-A 'Mozilla/5.0'`，绕 JA3 限流） | `search_share`（kind=magnet/all） |
 | headless Chrome | `src/robust.ts:fetchHeadless`（`chrome.exe --headless=new --dump-dom --virtual-time-budget=10000`） | `fetch_robust` 前三通道均未命中时 |
 | 密钥消费 | `src/index.ts` → `searchTavily/searchSerper/searchPatent/searchGithub/lookupDnsHistory/searchShodan` | 对应工具执行时 |
-| **观测收口** | **`src/index.ts:reg()` 内层 `tracedExecute(tool)`** —— **23 个工具的唯一观测落笔点**（一个包装器覆盖全部工具面，见 §4.4） | 每次工具调用 |
+| **发现层** | `src/discover-fetch.ts:discoverUrls`（Common Crawl CDX 128 月度索引 + crt.sh）· `src/discover-site.ts:discoverSite`（robots → sitemap 探测 → 有界 BFS → 附件 → 站内搜索探测） | `discover_urls` / `discover_site` |
+| **抽取层** | `src/document.ts:fetchDocument` → `scripts/extract_document.py`（WSL `python3`，魔数优先，无 OCR） | `fetch_document` |
+| **情报层** | `src/intel-scan.ts:scanTarget/scanAll`（`collect` 按 kind 分派 → `diffNew` → **落盘与快照更新在同一函数**）· `src/intel-api.ts:mapApiItems`（声明式 JSON 映射）· `src/intel-store.ts:IntelStore`（落盘 `<DSH_HOME>/intel/`） | `intel_watch` / `intel_scan` / `intel_list` / `intel_digest` / `intel_prune` |
+| **状态注入** | `src/index.ts:ctx.systemPrompt.context({ name:'intel-status', order:850 })`——**无未读时返回空串**（省 token），整体 try/catch（注入层绝不反噬主流程） | 每次模型请求开头物化 |
+| **定时扫描** | `src/index.ts:setInterval`（**到期检查**而非直接定时：读 `status.json` 的 `lastScanAt` 比对间隔）· `unref()` · 全程 try/catch | 每 60s 检查一次，到期才扫 |
+| **观测收口** | **`src/index.ts:reg()` 内层 `tracedExecute(tool)`** —— **32 个工具的唯一观测落笔点**（一个包装器覆盖全部工具面，见 §4.4） | 每次工具调用 |
 | **轨迹落盘** | `src/index.ts:searchTrace(composeSearchEntry(…))` → `<DSH_HOME>/search-trace.jsonl`（boot 行 + 每调用一行） | `apply()` 装载 + 每次工具调用 |
 
 ### 4.4 自证轨迹契约（`<DSH_HOME>/search-trace.jsonl`）`[MUST]`
 
-**动机**：本插件有 **23 个工具**，而每次调用的真实经过（走了哪个引擎 / **反爬通道链走到哪一级** / 聚合去重后剩多少条 / 耗时 / 断在哪一段）此前**只写 `ctx.logger`**，宿主 logger **不落盘**。
+**动机**：本插件有 **32 个工具**，而每次调用的真实经过（走了哪个引擎 / **反爬通道链走到哪一级** / 聚合去重后剩多少条 / 耗时 / 断在哪一段）此前**只写 `ctx.logger`**，宿主 logger **不落盘**。
 
 代价已实测：headless 清理缺陷泄漏 ~180MB **而日志全干净**（§9）——「降级到哪一级、哪一级失败了」当时完全不可见。
 
@@ -153,8 +173,8 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 
 | # | 可证伪命题 | 证据（单测名/命令/日志行/HTTP） | 状态 |
 |---|-----------|------------------------------|------|
-| A1 | 工具面恰为 23 个 | `Select-String src/index.ts -Pattern "^\s*name: '(search\|fetch\|archive\|lookup\|enum)_"` 计数 = 23 | 已实测（2026-09-14） |
-| A2 | `apply()` 不抛且注册 23 工具 | `node scripts/apply-test.mjs` 输出 `REGISTERED: 23` | 待验收 |
+| A1 | 工具面恰为 **32** 个 | `Select-String src/index.ts -Pattern "^    name: '"` 计数 − 1（注入名 `intel-status`）= **32** | 已实测（2026-10-17 现算） |
+| A2 | `apply()` 不抛且注册 32 工具 | `node scripts/apply-test.mjs` 输出 `REGISTERED: 32` | 待验收 |
 | A3 | 真实 execute 返回值过 schema | `node scripts/schema-test.mjs` 输出 `validate violations: NONE` | 待验收 |
 | A4 | 缺 key 时显式拒绝（非静默） | 无 key 调 `search_shodan` → `{ok:false,error:'未配置 shodanKey（Config）'}` | 待验收（源码判据 §4.2） |
 | A5 | 缓存命中不重复出网 | 同参二次 `search_web` → `search_quota` 同名通道计数不增 | 待验收 |
@@ -169,7 +189,7 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A14 | **`count` = 聚合去重后条数，不被元数据数组污染** | `npm test` → `resultCount`：显式 `count` 优先；**`{attempts:[a,b,c]}` → 0**（真缺陷回归，实证样本 = `fetch_robust` 返回体）；`warnings` 跳过；`NaN` 不算合法 count | **已实测** |
 | A15 | 观测绝不反噬主流程（IO 失败不抛） | `npm test` → `尸体测试：父路径是普通文件 → 返回 false 且不抛`（`assert.doesNotThrow` + `=== false`） | **已实测** |
 | A16 | **`search_leaks` 的 `password` 永不落盘**（隐私红线端到端） | `npm test` → `隐私尸体测试端到端`：喂 `{password:'hunter2secret'}` → 断言 `params === ''`；喂 `apiKey`/`token` → 断言摘要里不含键名；喂 error 含 `Bearer <32位>` → 断言落盘原文 `includes(secret) === false`（逐个）；且 `[redacted]` 确实出现、非敏感参数 `query=爱丽丝` 仍可读 | **已实测** |
-| A17 | 观测覆盖全部 23 工具（无旁路） | 收口在 `reg()` 内层——**23 个工具的唯一注册入口**，故覆盖率为工具数本身；新增工具只要走 `reg()` 即被观测（§4.4 调用点清单） | **待线上验收**（覆盖率由构造保证，非逐点登记） |
+| A17 | 观测覆盖全部 **32** 工具（无旁路） | 收口在 `reg()` 内层——**32 个工具的唯一注册入口**，故覆盖率为工具数本身；新增工具只要走 `reg()` 即被观测（§4.4 调用点清单） | **待线上验收**（覆盖率由构造保证，非逐点登记） |
 | A18 | **`search_deep` 的输出能被人读到**（render 契约） | `dsh-tools` 的 render 必须返回 **`[{ type:'text', text }]`**；2026-09-18 实测：返回裸字符串数组时 **trace 记 `ok:true`/8.6 s 而界面显示为空**（沉默失败）⇒ 修后线上 `search_deep` 输出完整带 `[n]` 引用的报告 | **已实测（2026-09-18，线上 4 源/抓 4）** |
 | A19 | **`search_web` 默认引擎组含两条活通道**（抗单点） | `scripts/search-bench-eval.mjs` 的 `engineCoverage`：修复前 **`parallel` 独苗**；把 `searxng` 拉进默认组后 = **`parallel 37/80` + `searxng 13/63`**（⚠ 前提＝SearXNG 容器健康，见 A20 与 §9 的端口冲突坑） | **已实测（2026-09-18）** |
 | A20 | **自托管 SearXNG 的 JSON 通道可用** | `curl 'http://127.0.0.1:18788/search?q=…&format=json'` → HTTP 200 / 20~35 条 / `engines_used=[google cse, duckduckgo, …]`；容器需 **代理 env** + **`network_mode: host`** + **`SEARXNG_PORT=18788`**（**端口从 8888 迁走了**，见 A23 与 §9 的事故记录）；恢复法 `docker compose down --remove-orphans` → `up -d`（`--force-recreate` 会留端口僵尸） | **已实测（2026-09-18）** |
@@ -180,6 +200,13 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A25 | **领域路由：代码类问题自动带 GitHub、研究类带学术三源** | `search_deep` 报告的「领域路由」行 + 工具参数 `routing=off` 可关；`npm test` → `tests/routing.test.mjs` 5 例（中英双命中/退化输入）| **已实测** |
 | A26 | **多引擎交叉验证标记** | `search_deep` 报告每条来源标 `★多引擎一致`（≥2 条通道独立命中同一 URL），并在汇总行给 `多引擎一致 N 条` | **已实测** |
 | A27 | **通道「0 条」有现场快照可查**（不猜判据，先让现象自证） | DDG 三次全 0 条 / parallel 四处静默 `return []` 任一发生 ⇒ 追加一行到 `<DSH_HOME>/search-channel-diag.jsonl`（`engine/shape/query/elapsedMs/features`）；`npm test` → `tests/channel-diag.test.mjs` **15 例**（DDG 五形状 + parallel 四形状各一份**尸体样本** + 显式 home 优先 + 不可写返回 false 且不抛 + 「仅泛化词不判 anomaly」精确性）；**线上触发实测（2026-10-08 08:34）**：`duckduckgo=ok:0@8739ms` ⇒ 侧车 1 行 `shape=anomaly`、`len=14235`、`blocks=0`，并已取回原页确认是反爬页（`cc=botnet` / `anomaly-modal`） | **已实测**（离线 15/15 + 线上现场 1 行 + 原页地面真相） |
+| A28 | **结构页永远不进情报库**（I6） | `npm test` → `isStructuralPage` 真实线上样本（含 `list2.htm`/`list231.htm` 分页列表页）+ 尸体样本「list.htm 必须被拦」；线上互证：`intel_prune` 干跑命中 **76** = 独立脚本命中 **76**，apply 后注入读数 **41 = 117 − 76** | **已实测（2026-10-17）** |
+| A29 | **基线扫描只收高价值类**（I7） | 线上正对照：新登记 ccgp.gov.cn 首扫 → `扫到 9 · 新增 9`，**全部是附件、零页面**（同型首扫在修复前产 118 条页面） | **已实测（2026-10-17）** |
+| A30 | **增量判据可证伪**（I8） | 同目标连扫两次：ccgp 第二次 `扫到 16 · 新增 0`（候选涨了 7 条页面而新增仍 0 ⇒ 快照记全部候选 + worthy 过滤**协同**工作）；另三个目标各自第二次扫均为 0 | **已实测（2026-10-17）** |
+| A31 | **空与失败分型**（I9） | 线上读数矛盾：`search_academic` 有 5 条结果而 `intel_scan` 报 0 条 ⇒ 修后同查询 `扫到 15 · 新增 13`（849ms）；`npm test` → `summarizeScans` 三态测试（partial 与 ok/failed 不互相掩盖） | **已实测（2026-10-17）** |
+| A32 | **渲染走单一真源**（I11） | `npm test` → 结构断言「`index.ts` 不得含硬编码标签字面量」+ `kindTag` 四类映射 + 未知兜底；**该断言已用尸体注入验证有区分力**（注入 `'[附件]'` ⇒ 红；撤销 ⇒ 绿） | **已实测（2026-10-17）** |
+| A33 | **声明式 JSON API 源可用**（第 4 类 kind） | 线上：币安公告端点 `扫到 20 · 新增 20`（279ms，`[公告]` 标签正确）；`npm test` → `tests/intel-api.test.mjs` 12 例（**真实响应样本** + itemsPath 配错响亮报错 + 模板字段缺失跳过计数 + 非数组报实际类型 + 跳过与故障分离） | **已实测（2026-10-17）** |
+| A34 | **判据升级后存量能跟上** | `intel_prune` 干跑 → apply → 注入读数精确变化（76→41 页面、6→35 页面两次）；工具**软标记可逆**（append `status=dropped` + `meta.droppedReason`，再 append `new` 即恢复） | **已实测（2026-10-17）** |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 
@@ -193,6 +220,20 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **未实现/未验证**：`archive.ts:archiveTodayLookup` **已实现但未接入任何工具**（死代码）；README 提到的 SearXNG 增强**未实现**；`community` 的 `tieba` 平台仅在类型里（`CommunityPlatform`），`COMMUNITY_PLATFORMS` 与工具 enum 均只含 `reddit/hn/4chan`。
 
 ## 9 · 实践修订记录
+
+- **2026-10-17 · 发现层 + 抽取层 + 情报系统（24→32 工具；判据被线上读数修了 5 次）**
+  - **动机（主人指令链）**：「继续提升搜索能力，借鉴 github 的优秀项目」（**是优秀项目，不是高 star 的水货**）→「让互联网上的大多数信息都能成为你搜索库的一部分」→「**信息提取反而是容易的，难的是发现**」（这句推翻了我的原诊断）→「搭建情报系统」。
+  - **新增三层**：L4 发现（`discover_urls` = Common Crawl 128 个月度索引 + crt.sh；`discover_site` = robots/sitemap 探测/有界 BFS/附件清单/站内搜索探测 + 覆盖度自评 + CRATOR 三指标）· L5 抽取（`fetch_document` → WSL Python 抽 docx/xlsx/pdf/xls/csv/html，零安装成本）· L5 情报（`intel_watch` / `intel_scan` / `intel_list` / `intel_digest` / `intel_prune`）。
+  - **★ 五个判据全是线上读数修出来的**（离线全绿时看不见）：
+    ① **信噪比**：161 条未读里 118 条是页面 URL，且**全部产自同一次基线扫描** ⇒ 「新 URL 即情报」把站点地图当情报（一个站几千页，无限产噪音）。修法三条必须同时成立：结构页永远不进库 + 基线只收高价值类 + 快照记全部候选。
+    ② **`list2.htm` 漏判**：正则只匹配 `list.htm`，而 `list2.htm`/`list231.htm` 是分页列表页 ⇒ 进了库并被读成内容页（**判据比对象宽**）。真实线上样本已进测试。
+    ③ **读数歧义**：digest 头部「new 15 条待看」在未读 72 条时会被读成「只有 15 条未读」⇒ `shown`（本次列出）与 `filtered`（未读合计）必须分开说。
+    ④ **渲染漏改**：加 `api` kind 时改了 digest 的标签渲染、**漏了扫描读数的** ⇒ 币安公告显示成 `[页面]`，**读数失真而没有任何报错**。处置不是「下次记得改两处」（枚举式判据注定在命名空间扩张时静默失效），而是抽 `kindTag()` 单一真源 + **结构断言测试**（`index.ts` 里再出现硬编码标签即失败）；该断言已用**尸体注入**验证有区分力（注入 ⇒ 红；撤销 ⇒ 绿）。
+    ⑤ **空与失败不分型**：`search_academic` 有 5 条结果，而 `intel_scan` 扫同一查询得 0 条——真因是 `searchAcademic` 四个源一律 `.catch(() => [])`，源失败被读成「扫到 0 条 · state=ok」。修：`onError` 回调上抛 ⇒ `sourceErrors`（I9）。**顺带抓出 arxiv 两处**：用 http（走一次重定向，慢且偶发失败）+ 短语裸空格被解析成 OR（`self-improving agent` 实查 `self-improving OR agent`，105746 条，与意图完全不同）。
+  - **实测源**：ccgp.gov.cn（首扫 9 条**全是附件**、零页面——基线判据的正对照）· sues.edu.cn（43 附件 + 页面）· arxiv（修复后 15 条 / 849ms）· **币安公告 API**（声明式第 4 类源，20 条 / 279ms，含上币公告）。
+  - **声明式 JSON API 源**（`src/intel-api.ts`）：`itemsPath` / `idPath` / `titlePath` / `urlTemplate` 路径映射 ⇒ **加源不写代码**。判据：路径取不到 ⇒ 响亮报错（「0 条」与「路径配错」是两件事）；模板字段缺失的条目跳过并计数（**不产残缺 URL**——残缺 URL 会进快照、污染增量判据，且看起来像「抓到了」）；「跳过 N 条」（数据形状 ⇒ `notes`）与「路径取不到」（结构性失败 ⇒ `errors`）**分开报**。
+  - **存量清理原语**（`intel_prune`）：判据会升级，存量不会自动跟上（实测新判据上线后库里仍有 76 条旧判据产的噪音，占未读 47.5%）⇒ 软标记可逆 + 默认干跑 + 原因进 meta。实测：干跑 76 = 独立脚本 76（**工具与脚本互证**）；apply 后注入读数 41 = 117 − 76（精确吻合）。
+  - **验收**：`node --test` → **202/202**（+12 api 层 + 若干判据测试，含**真实响应样本**与 6 具尸体样本）；`tsc` EXIT=0；预检通过；6 次重启逐一线上取证（**每次线上验证都抓出离线看不见的真缺陷**——这个节奏本身就是本轮的结论）。
 
 - **2026-10-08 · 通道「0 条」现场快照（诊断埋点 · 工单 t-6bee3fd0 第 1 步）**
   - **动机（读数缺陷）**：基线 v2 里出现过 `duckduckgo=ok:0`（两题，~5.3s）与 `parallel=ok:0`（两题，**~1000ms 秒回**，而成功态是 1099–7778ms）。两者都是**拿不到结果却记为「成功但空」**：DDG 三次尝试全解析 0 条后 `return last`（`[]`），`runChannel` 据此记 `ok:true, count:0` ⇒ 通道可靠性被高估，5.3s 的失败成本不可见。
@@ -274,6 +315,12 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
   - 教训（回写技能 `semantic-doc-first`）：文档的「依赖」一节必须区分 **npm 依赖** 与 **运行期外部依赖**（进程/守护/可执行文件），否则语义文档会给出「能跑」的错误信心。
 
 ## 10 · 未决问题
+
+- **U7（新，2026-10-17）情报库无上界与轮转**：`items.jsonl` 纯追加（软标记也只增行，`intel_prune` 同样是 append），无上界。当前 189 条无压力，但站点类目标可持续产条目 ⇒ 需要归档策略。⚠ **不能照搬 U6 的按行数裁剪**——情报条目按行丢会丢信息；正解是先按状态归档（`dropped` / 老 `seen`）再考虑物理轮转。
+- **U8（新，2026-10-17）站内搜索探测的覆盖边界**：三站实测——上师大 **POST 型**（`action=/_web/_search/api/search.new.rst`，参数 `input=keyword`）· gov.cn **无 action**（JS 驱动）· wikipedia **需组合参数**。论文的「只有 GET 可索引」是硬边界 ⇒ **中国站点大量用 POST/JS，该功能覆盖率有限**。已如实报原因（不假装「这个站没有搜索接口」），**未做**的是 POST 表单的实际提交（需构造 body + CSRF 处理）。
+- **U9（新，2026-10-17）「表单之后的深网」无人覆盖**：本轮读的 12 篇论文**没有一篇处理表单提交之后的深网**——那正是 Harnessing the Deep Web（CIDR 2009）的原始命题，也是我缺的那块。当前 `discover_site` 只做 GET 探测。
+- **U10（新，2026-10-17）情报推送未实测**：`intel_digest` 出文本 + telegram 发送是**两个独立动作**（推送与否归主体裁决，见 §1 反定位）。判据已写进技能 `deep-web-discovery`（高价值新增 + 有时效性 + 非睡眠时段），但**一次真实推送都没做过**（深夜不宜打扰）⇒ 早间汇总时验证。
+- **U11（新，2026-10-17）`.doc` 抽取未验证**：`antiword` 因 apt 依赖冲突未装上，`extract_document.py` **如实报「未验证」**（不假装能读）。老式 `.doc` 在政府/高校站点常见，是覆盖缺口而非已知不可行。
 
 - **U2 缓存淘汰只清过期项**：`set()` 在 `size > 500` 时仅删 `expiresAt` 已过的键；高活跃会话可超 500 条常驻。
 - **U3 `SearchStore` 作用域**：实例在 `apply()` 内创建——单 web 进程内多会话是否共享同一实例（→ 缓存/配额是否跨会话串味）待实测确认；确认后回写本节。
