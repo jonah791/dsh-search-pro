@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, isStructuralPage, isHighValue, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, isStructuralPage, isHighValue, kindTag, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -1392,11 +1392,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           lines.push('')
           lines.push(`## ${tid}（${items.length} 条）`)
           for (const it of items) {
-            const tag =
-              it.kind === 'attachment' ? '[附件]'
-              : it.kind === 'paper' ? '[论文]'
-              : it.kind === 'api' ? '[公告]'
-              : '[页面]'
+            const tag = kindTag(it.kind)
             lines.push(`${tag} ${it.title || it.url}`)
             if (it.title) lines.push(`   ${it.url}`)
           }
@@ -1606,7 +1602,7 @@ function renderIntelScan(_a: any, v: any): any[] {
     parts.push('')
     parts.push(`## 新增条目（${items.length}）`)
     for (const it of items.slice(0, 20)) {
-      const tag = it.kind === 'attachment' ? '[附件]' : it.kind === 'paper' ? '[论文]' : '[页面]'
+      const tag = kindTag(it.kind)
       parts.push(`· ${tag} ${it.title || it.url}${it.source ? ` (${it.source})` : ''}`)
     }
     if (items.length > 20) parts.push(`… 另有 ${items.length - 20} 条`)

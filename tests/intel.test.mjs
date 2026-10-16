@@ -6,6 +6,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   fingerprint,
@@ -13,6 +14,7 @@ import {
   classifyItem,
   isStructuralPage,
   isHighValue,
+  kindTag,
   isIntelWorthy,
   normalizeItem,
   intelStats,
@@ -259,4 +261,26 @@ test('★★ 尸体样本：api 源首次扫描（基线）必须放行——漏
 
 test('isIntelWorthy：结构页即使来自 api 源也被拦（豁免没有写宽）', () => {
   assert.equal(isIntelWorthy('https://x/list.htm', { isBaseline: true, source: 'api' }), false)
+})
+
+// ── kindTag（单一真源 · 2026-10-17 实测事故驱动）─────────────────────────
+//
+// 事故：新增 api kind 时我改了 digest 的渲染却漏了 intel_scan 的
+// ⇒ 币安公告在扫描读数里显示成 [页面]，**读数失真而没有任何报错**。
+// 处置不是「下次记得改两处」，而是抽成单一真源 + 加结构断言。
+
+test('★ kindTag：四类标签 + 未知兜底（兜底不许是空串——空串会让读数缺一列）', () => {
+  assert.equal(kindTag('attachment'), '[附件]')
+  assert.equal(kindTag('paper'), '[论文]')
+  assert.equal(kindTag('api'), '[公告]')
+  assert.equal(kindTag('page'), '[页面]')
+  assert.equal(kindTag('unknown'), '[页面]')
+  assert.equal(kindTag('some-future-kind'), '[页面]', '未来新增 kind 时兜底仍要有值')
+})
+
+test('★★ 结构断言：index.ts 不得再有硬编码标签字面量（防枚举式漂移复发）', () => {
+  // 「结构 > 纪律」：靠「记得改 N 处」必然复发；把判据变成可执行断言才拦得住
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const hits = [...src.matchAll(/'\[(附件|论文|公告|页面)\]'/g)].map((m) => m[0])
+  assert.deepEqual(hits, [], `index.ts 仍硬编码标签：${hits.join(', ')}——必须走 kindTag()`)
 })

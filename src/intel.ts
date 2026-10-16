@@ -123,6 +123,20 @@ export function isHighValue(kind: string): boolean {
 }
 
 /**
+ * 条目类型的**显示标签**（单一真源）。
+ *
+ * 抽出来的理由（2026-10-17 实测事故）：新增 `api` kind 时我改了 digest 的渲染
+ * 却漏了 intel_scan 的——结果币安公告在扫描读数里显示成 `[页面]`，
+ * **读数失真而没有任何报错**。枚举式判据注定在命名空间扩张时静默失效。
+ */
+export function kindTag(kind: string): string {
+  if (kind === 'attachment') return '[附件]'
+  if (kind === 'paper') return '[论文]'
+  if (kind === 'api') return '[公告]'
+  return '[页面]'
+}
+
+/**
  * 结构页判据：**容器而非内容**。
  *
  * 存在理由（2026-10-16 线上实测）：161 条情报里 118 条是页面 URL，
