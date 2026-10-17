@@ -23,6 +23,7 @@ import {
 import { fetchRobots, probeSitemaps, type SitemapProbe } from './discover-fetch.js'
 import { probeSearchEndpoint, expandViaSearch } from './discover-search-fetch.js'
 import { extractSeedTerms, extractSearchForms } from './discover-search.js'
+import { extractPublishedAt, timeForAttachment, type FoundTime } from './published-at.js'
 
 export interface SiteOpts {
   /** 最多访问多少页（上界，防爆炸） */
@@ -55,6 +56,15 @@ export interface SiteDiscovery {
   pages: string[]
   /** 附件 URL（深网高价值目标） */
   attachments: string[]
+  /**
+   * 页面 / 附件的时间（2026-10-17 新增 · 给 **site 类**补时效维）：url → `{ at, from }`。
+   *
+   * **抽到的才有键**；缺省 ⇒ 上层渲染「时间未知」——那是**正确行为**（如实标注「不知道」），
+   * 不得用「抓取时刻」冒充发布时间（假时效比没有更坏）。
+   * 与 `pages` / `attachments` **并列而非合并成对象数组**，是为了零破坏：所有现有调用方
+   * （含公开工具 `discover_site`）逐字不变。
+   */
+  times: Record<string, FoundTime>
   /** feed URL */
   feeds: string[]
   /** 实测读数 */
@@ -290,6 +300,8 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
   const pages = new Set<string>()
   const attachments = new Set<string>()
   const feeds = new Set<string>()
+  /** 页面/附件时间（2026-10-17）：url → `{ at, from }`。**抽到的才有键**（缺省即「时间未知」） */
+  const times = new Map<string, FoundTime>()
   const byExt: Record<string, number> = {}
   let fetched = 0
   let failed = 0
@@ -350,6 +362,10 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
       continue
     }
     pages.add(url)
+    // 页面时间（2026-10-17）：`html` 就在手上——这是 site 类时效维**唯一**的抽取点。
+    // 抽不到就不写键（上层渲染「时间未知」），绝不用抓取时刻冒充。
+    const pageTime = extractPublishedAt(html)
+    if (pageTime) times.set(url, pageTime)
     if (depth === 0 && !homeHtml) homeHtml = html
 
     // ④ 站内搜索扩展（Harnessing the Deep Web 迁移）：爬满 5 页后做一次，**只做一次**
@@ -408,7 +424,16 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
     const found = extractDiscoveryLinks(html, url)
     for (const s of found.sitemaps) sitemapUrls.push(s)
     for (const f of found.feeds) feeds.add(f)
-    for (const a of found.attachments) attachments.add(a)
+    for (const a of found.attachments) {
+      attachments.add(a)
+      // 附件时间（2026-10-17）：优先自身 URL 里的日期段，否则**继承所在页面的时间**。
+      // 附件是在文章页里被发现的（公告页 + 它的 .docx），页面时间≈附件发布时间；
+      // 继承来的标 `from: 'page'`，与 `url` 区分开——读的人据此判断可信度。
+      if (!times.has(a)) {
+        const at = timeForAttachment(a, pageTime)
+        if (at) times.set(a, at)
+      }
+    }
 
     // 站内链接入队（导航页优先，插到队首）
     const hrefRe = /href\s*=\s*["']([^"']+)["']/gi
@@ -492,6 +517,9 @@ export async function discoverSite(baseUrl: string, opts: SiteOpts = {}): Promis
     pages: [...pages],
     attachments: [...attachments],
     feeds: [...feeds],
+    // 页面/附件时间（2026-10-17）：转普通对象（可 JSON 序列化）。
+    // 空对象 = 一个都没抽到——那是**如实结果**（上层渲染「时间未知」），不是缺陷。
+    times: Object.fromEntries(times),
     stats: {
       fetched, failed, maxDepthReached, byExt,
       // CRATOR 三指标（2026-10-16 迁移）：失败率 / 吞吐 / 耗时——此前只有发现数，无这些口径

@@ -100,9 +100,17 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
       maxDepth: target.spec.maxDepth ?? opts.maxDepth ?? 3,
       delayMs: opts.delayMs ?? 150,
     })
+    // 页面/附件时间（2026-10-17）：site 类此前一律「时间未知」——根因是 discoverSite
+    // 返回的是纯 URL 字符串（时间在源侧就没取），与 api/arxiv 那两个实例**不同型**。
+    // 现在 discoverSite 旁挂 `times`（带来源标注），这里透成 `publishedAt`。
+    // 抽不到的项**不带该键** ⇒ 渲染层如实显示「时间未知」，不用抓取时刻冒充。
+    const timeOf = (u: string): { publishedAt?: string } => {
+      const t = s.times[u]
+      return t ? { publishedAt: t.at } : {}
+    }
     const found = [
-      ...s.pages.map((u) => ({ url: u, source: 'crawl' })),
-      ...s.attachments.map((u) => ({ url: u, source: 'crawl-attachment' })),
+      ...s.pages.map((u) => ({ url: u, source: 'crawl', ...timeOf(u) })),
+      ...s.attachments.map((u) => ({ url: u, source: 'crawl-attachment', ...timeOf(u) })),
     ]
     return { found, confidence: s.coverage.confidence, gaps: s.coverage.gaps }
   }
