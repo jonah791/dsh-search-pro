@@ -217,6 +217,7 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A40 | **读数透传（不手写字段枚举）**（I15） | `npm test` → `tests/render-intel-scan.test.mjs` 6 例（透传 `backfilled` / **未知字段照传**（未来的字段不必回来改）/ 渲染出「补写时间 20」/ **反向**：无 `backfilled` 不得显示「补写时间 0」/ 时效标签 / 「时间未知」）。**该判据已用真实缺陷标定**：改回手写枚举 ⇒ 第 1 条立刻挂（第三次同型事故的形状） | **已实测（2026-10-17）** |
 | A41 | **按目标设扫描周期**（I16：快源不被全局拖住） | `npm test` → `tests/intel-due.test.mjs` 6 例（自带周期覆盖全局 / 缺省回落 / **从没扫过立刻到期** / **尸体样本**：`scanMinutes` 为 `0`·负数·字符串一律回落全局、坏 `lastScanAt` 立刻到期 / 边界是 `>=` 而非 `>` / 空列表不炸）；线上：`targets.json` 实测 **11 个目标**（含 02:51–02:52 新增的 `api-binance-maintenance` / `api-upbit-trade`），`api-binance-delisting` = **30 分钟**、`listing`/`okx` = 60、`activities` = 120、慢源保持全局 360；渲染层显形（`每 N 分钟`）。**动机来自信息差实证**：币安下架公告当日 −25%~−29%，全局 360 分钟会错过 | **已实测（2026-10-17）** |
 | A42 | **HTTP 错误归因可分辨**（429 ≠ 超时 · I17） | `npm test` → `tests/http-get-attribution.test.mjs` 5 例（**429 ⇒ 报「被限速」**、429 带 `Retry-After` 报出来、**超时 ⇒ 报「请求超时（Nms）」且非裸 `AbortError`**、其他非 2xx 报 `HTTP <code>`、正常返回文本）。**判据的分辨力**：429 与超时**不得同貌**（旧实现两者都表现为裸的 `This operation was aborted`）。线上：修复后 arxiv 失败信息变为 `请求超时（30000ms）for https://export.arxiv.org/api/query?search_query=all:deep+AND+all:web+AND+all:crawling&max_results=15——对端可能限速或响应慢`（此前是裸的 `This operation was aborted`）⇒ **归因正确**，且顺带证明 **AND query 构造正确**（URL 带出来了）。⚠ 新读数：**限速响应耗时已 >30s**（此前 16.2s）⇒ 惩罚与试探次数正相关 | **已实测（2026-10-17）** |
+| A43 | **回填与查询解耦 + arxiv 按提交时间排序**（U20 闭环） | `npm test` → `tests/arxiv-backfill.test.mjs` **14 例**（真实 Atom 语料解析；缺 `<published>` ⇒ 空串**不猜**；**源 `http://` 形态 id vs 库 `https://` ⇒ 归一后仍须匹配**；**缺口为空 ⇒ 零请求**——幂等的判据是「不打源」不是「打了没写」；有界 `maxIds`；源没给时间 ⇒ **不写**；只补本目标；**同资源被两个目标扫到 = 同一条（后写胜）**；`sortByDate` ⇒ URL 带 `sortBy=submittedDate&sortOrder=descending`，不给则**不得**带）。**存在理由（线上实测）**：`pickBackfill` 的覆盖面 = **本轮重扫结果 ∩ 库里缺字段条目** ⇒ `arxiv-deepweb` 三次重建 query 后交集**归零**（23 条全缺），而同 query 未变的 `arxiv-self-improving-agent` 补上了 **9 条**。⇒ 回填必须能按**条目标识**（arxiv `id_list`）问源，与查询无关。**排序 A/B 实测**：默认（相关性）返回 2019/2012/2016/2021/2026 混杂，加参数后严格降序 2026/2025/2025/2024/2024 且首条仍强相关 | **已实测（2026-10-17）** |
 
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 
@@ -239,6 +240,14 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
   - **★ 同类缺陷第二实例（字段在传输链上丢失）**：`deep.ts` 早就取了 arxiv 的 `extra.published`，而 `intel-scan` 的 arxiv 分支只取 `{url,title,source}` ⇒ 36 条论文全「时间未知」。修法：抽 `publishedAtFromExtra()` 具名函数使**接线可测**。**存量回填待 arxiv 限速解除**（U20）。
   - **收益（这才是它的意义）**：digest 新读数 **`时效：最新 6.4h 前 · 最老 24.5d 前 · 时间未知 50 条`** ⇒ **「未读 90 条全高价值」被修正为「真正新鲜（<24h）的只有 2 条」**。
   - **测试 231 → 239**（`intel-api-time` 12 例含真实语料锚 + `render-intel-scan` 6 例含反向案例）。
+
+- **2026-10-17 · arxiv 回填与查询解耦 + 按提交时间排序（A43；U20 闭环；判据从「重扫」改为「标识」）**
+  - **动机（实测读数驱动）**：库里 **182/291** 条缺 `publishedAt` —— 但**要分型**：页面/附件 149 条是**源侧本就不给时间**（`commoncrawl`/`crt.sh`/站点爬取无发布时间字段），**不是缺陷**；真正的问题是 paper（`arxiv-deepweb` **23 条全缺**）。
+  - **★ 根因（推翻了原假设）**：原以为「回填必须重扫，等限速解除即可」。实测证明**前提是错的** —— `pickBackfill` 的覆盖面 = 本轮重扫结果 ∩ 库里缺字段条目；`arxiv-deepweb` 的 query 重建过三次 ⇒ 新旧结果集 **0 交集** ⇒ **永远**补不上。**对照组**（query 从未变的 `arxiv-self-improving-agent`）补上了 **9/19 条** ⇒ 回填机制本身**是工作的**，只是覆盖面受「重扫返回什么」限制。
+  - **★ 修法**：加 `arxivByIds()`（`id_list` 端点）+ `backfillArxivByIds()` —— 按**条目标识**问源，与查询无关；缺口为空 ⇒ **零请求**（幂等）。判据含「**源 `http://` 形态 id vs 库 `https://` ⇒ 归一后仍须匹配**」（这正是直接用原始串比对会全 miss 的形状）。
+  - **★ 同批取证：U20 排序参数**（限速解除后 A/B）—— 默认相关性返回 2019/2012/2016/2021/2026（4/5 老论文），`sortBy=submittedDate&sortOrder=descending` 后严格降序且首条仍强相关 ⇒ 参数有效、相关性未崩坏。**显式 opt-in**（`search_academic` 等一次性检索不受影响）。
+  - **★ 判据（值得单独记住）**：**回填机制的有效性不能依赖「重扫恰好又返回它」** —— 只要源侧查询/排序/截断会变，交集就可能归零。⇒ 回填要走**稳定标识**（id / DOI / 公告号），不是重扫。
+  - **测试 252 → 266**（新增 `arxiv-backfill` **14 例**：真实 Atom 语料 + 3 具尸体样本（缺 `<published>` / 非 `/abs/` 形态 / 源没给时间）+ 幂等的「**零请求**」判据 + 已知语义锁（同资源跨目标 = 同一条，后写胜））。
 
 - **2026-10-17 · 发现层 + 抽取层 + 情报系统（24→32 工具；判据被线上读数修了 5 次）**
   - **动机（主人指令链）**：「继续提升搜索能力，借鉴 github 的优秀项目」（**是优秀项目，不是高 star 的水货**）→「让互联网上的大多数信息都能成为你搜索库的一部分」→「**信息提取反而是容易的，难的是发现**」（这句推翻了我的原诊断）→「搭建情报系统」。
@@ -343,7 +352,9 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 - **U18（新，2026-10-17）arxiv 修复后的「结果质量」未验证**：I13 的编码修复**请求形态已线上验证**（错误信息带出构造后的 URL，冒号保留 / 空格 `+` / 去重生效），但**「返回的论文是否真的相关」没验**——限速 429 挡住了（本机 IP 当晚连打 8+ 次，单次 429 响应耗时 16.2s）。⚠ 附带发现（已登记任务板 `t-2dfb92b5`）：429 响应慢时会**撞 `httpGet` 超时**，于是「被限速」被读成「超时」（`This operation was aborted`）——**归因方向被误导**。⇒ 待限速窗口过后重扫一次，用「新条目相关性」作为判据（旧 20 条的污染率 75% 是基准线）。
 - **U19（新，2026-10-17）`intel_watch` 改不了 spec——监控源无法演进**：`action=update` 只改 `note`，改不了 `query` / `url` / `maxPages` / `itemsPath`。想改 query 就只能 `remove` + `add`，而 `add` 会**清快照**（正确，否则增量判据失真）⇒ **代价是丢 `foundTotal` 与历史**。本轮就是这么处理 `arxiv-deepweb` 的（旧 20 条几乎全是垃圾，删了重建反而是净收益）——但那是**运气**，不是判据。⇒ 待做：`update` 支持可选 `spec`（部分合并 + 按 kind 校验必填项），且**改 spec 时显式报出「快照已清」**。已登记任务板 `t-e6ecec0a`。**（2026-10-17 02:2x 已闭环：`update` 支持 spec 字段级合并——辅助字段（`timePath`/`titlePath`/`idPath`/`urlTemplate`/`maxPages`）**不清快照**，取数范围（`url`/`domain`/`query`/`itemsPath`）变了才清并**显式报出**；线上实测 `已更新 api-okx-listing：timePath / note`）**
 - **U20（新，2026-10-17）arxiv 源产的是「论文库」不是「情报流」**：digest 里两条 arxiv 论文是 **2016 / 2020 年**的——arxiv API **默认按相关性排序**，不是按提交时间 ⇒ 监控源拿到的永远是「该主题的经典论文」，不是「新论文」。**修法方向**：`sortBy=submittedDate&sortOrder=descending`（arxiv API 标准参数），但**未取证**（02:24 实测仍 `Rate exceeded.`）⇒ 按 §5.9「能力断言先探测」，**未验证的参数不加**。
+  **（2026-10-17 10:00 已闭环）** 限速解除后 A/B 实测取证：默认排序返回 **2019/2012/2016/2021/2026**（4/5 是老论文），加参数后**严格降序 2026/2025/2025/2024/2024** 且首条 `SpiderSapien: Client-Centric Web Crawler and Security Scanner` 仍强相关 ⇒ **参数有效且相关性未崩坏**。实现：`academicArxiv` 加可选 `sortByDate`（**显式 opt-in**——一次性检索仍可用相关性，不破坏既有调用方），`intel-scan` 的 arxiv 分支传 `{arxivSortByDate:true}`。判据锁在 **A43**。
   ⚠ 同一处还有第二个待办：arxiv 的**存量回填**（36 条论文的 `publishedAt`）也要等限速解除——接线**已上线**（`publishedAtFromExtra`），但**回填必须重扫**，而限速挡着。**实测边界**：限速窗口 **> 32 分钟**（01:51 调用 → 02:24 仍 `Rate exceeded.`，14 字节立即返回，**不是超时**）；每次试探都在延长窗口。
+  **（2026-10-17 10:00 已闭环，且**修法被推翻**）** 重扫后发现「回填必须重扫」这个前提**是错的**：`pickBackfill` 的覆盖面 = 本轮重扫结果 ∩ 库里缺字段条目，而 `arxiv-deepweb` 的 query 重建过三次 ⇒ 新旧结果集 **0 交集** ⇒ 23 条**永远**补不上（对照组：query 未变的 `arxiv-self-improving-agent` 补上了 9 条）。⇒ 改为**按条目标识**（arxiv `id_list` 端点）定向回填，与查询无关（`backfillArxivByIds`，缺口为空时**零请求**）。判据锁在 **A43**。
 
 - **U2 缓存淘汰只清过期项**：`set()` 在 `size > 500` 时仅删 `expiresAt` 已过的键；高活跃会话可超 500 条常驻。
 - **U3 `SearchStore` 作用域**：实例在 `apply()` 内创建——单 web 进程内多会话是否共享同一实例（→ 缓存/配额是否跨会话串味）待实测确认；确认后回写本节。

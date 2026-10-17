@@ -10,15 +10,17 @@
 
 import { discoverSite } from './discover-site.js'
 import { discoverUrls } from './discover-fetch.js'
-import { searchAcademic } from './deep.js'
+import { arxivByIds, arxivIdFromUrl, searchAcademic } from './deep.js'
 import { mapApiItems, publishedAtFromExtra } from './intel-api.js'
-import { diffNew, isIntelWorthy, normalizeItem, pickBackfill, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
+import { diffNew, fingerprint, isIntelWorthy, normalizeItem, pickBackfill, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
 import type { IntelStore } from './intel-store.js'
 
 export interface ScanOpts {
   maxPages?: number
   maxDepth?: number
   delayMs?: number
+  /** 取 XML 的注入点（缺省 httpGet）。定向回填要能**离线测**——真发请求的判据测不了。 */
+  fetchXml?: (url: string) => Promise<string>
 }
 
 export interface ScanResult extends ScanOutcome {
@@ -28,6 +30,55 @@ export interface ScanResult extends ScanOutcome {
   rawCount: number
   /** 本轮**补写**了 publishedAt 的存量条目数（「给已落盘条目加字段」的通用缺口，见 pickBackfill） */
   backfilled?: number
+}
+
+/**
+ * 定向回填：按 **arxiv id** 直接问源，补上已落盘条目的 `publishedAt`。
+ *
+ * 与 `pickBackfill` 的分工（2026-10-17 实测驱动）：
+ * - `pickBackfill` 的覆盖面 = **本轮重扫结果 ∩ 库里缺字段条目**。查询变更
+ *   （`arxiv-deepweb` 三次重建）或源侧排序漂移会让这个交集**归零** ⇒ 旧条目永远补不上
+ *   （实测：23 条全缺，而同 query 未变的另一目标补上了 9 条）。
+ * - 本函数按**条目标识**问源 ⇒ 与查询无关。
+ *
+ * 幂等：缺口为空直接返回 0（**零请求**——补完就不再打源）。
+ * 有界：一次最多 `maxIds` 条（`id_list` 过长会被源拒，请求体量也要可控）。
+ */
+export async function backfillArxivByIds(
+  store: IntelStore,
+  targetId: string,
+  fetcher?: (url: string) => Promise<string>,
+  maxIds = 50,
+): Promise<number> {
+  const known = store.listItems({ targetId, limit: 0 }).items
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const it of known) {
+    if (it.publishedAt) continue
+    const id = arxivIdFromUrl(it.url)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    ids.push(id)
+    if (ids.length >= maxIds) break
+  }
+  if (ids.length === 0) return 0
+
+  const rs = await arxivByIds(ids, fetcher)
+  // id 一律经 fingerprint 归一后再比对（库里 id 就是归一化产物，见 normalizeItem）——
+  // 源返回的 <id> 是 `http://arxiv.org/abs/...` 形态，直接拿原始串比对会全部 miss。
+  const timeById = new Map<string, string>()
+  for (const r of rs) {
+    const t = publishedAtFromExtra(r.extra)
+    if (t) timeById.set(fingerprint(r.url), t)
+  }
+  let n = 0
+  for (const it of known) {
+    if (it.publishedAt) continue
+    const t = timeById.get(it.id)
+    if (!t) continue
+    if (store.patchItem(it.id, { publishedAt: t })) n += 1
+  }
+  return n
 }
 
 interface Collected {
@@ -69,9 +120,17 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
     if (!q) return { found: [], error: 'arxiv 目标缺 spec.query' }
     // 源错误必须带出来（2026-10-17 实测：arxiv 失败曾被上层吞成「扫到 0 条 · state=ok」）
     const errs: string[] = []
-    const rs = await searchAcademic(q, 'arxiv', target.spec.maxPages ?? 15, (s, e) => {
-      errs.push(`${s}: ${e instanceof Error ? e.message : String(e)}`)
-    })
+    const rs = await searchAcademic(
+      q,
+      'arxiv',
+      target.spec.maxPages ?? 15,
+      (s, e) => {
+        errs.push(`${s}: ${e instanceof Error ? e.message : String(e)}`)
+      },
+      // 监控要的是**新论文**，不是「该主题的经典论文」（U20 实测 A/B：默认相关性排序
+      // 返回 2012/2016/2019 老论文；按提交时间降序后严格 2026→2025→2024）。
+      { arxivSortByDate: true },
+    )
     const found = rs.map((r) => {
       // 论文的发布时间决定它是不是**新论文**（2026-10-17：36 条论文全「时间未知」，
       // 而字段**早就在手里**——deep.ts 已取 `extra.published`，只是这里没接上。
@@ -193,6 +252,18 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
   store.patchTarget(target.id, { lastScanAt: now, foundTotal: next.size })
 
   const sourceErrors = collected.sourceErrors ?? []
+
+  // ★ 定向回填（2026-10-17）：上面那条 `pickBackfill` 依赖「本轮重扫恰好又返回同一篇」，
+  // 查询变更/排序漂移会让交集归零 ⇒ 旧条目**永远**补不上时间。这条按**条目标识**问源。
+  // 放在 sourceErrors 之后，是为了让回填失败进同一份故障读数：它是**补写不是取数**，
+  // 失败不该把本轮扫描判死，但也不许静默（§5.10）。
+  if (target.kind === 'arxiv') {
+    try {
+      backfilled += await backfillArxivByIds(store, target.id, opts.fetchXml)
+    } catch (e) {
+      sourceErrors.push(`arxiv 定向回填失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
   // 全源失败 ⇒ 如实报 failed（不许因为「没抛异常」就报 ok——那正是 2026-10-16 的静默形状）
   // 判据用**候选数**而非 worthy 数：worthy 被过滤光但候选非空 = 扫描成功只是没有值得报的
   if (collected.found.length === 0 && sourceErrors.length > 0) {

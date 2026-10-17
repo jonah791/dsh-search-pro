@@ -74,13 +74,34 @@ export function encodeArxivQuery(q: string): string {
     .replace(/ /g, '+')
 }
 
-export async function academicArxiv(query: string, limit = 8): Promise<DeepResult[]> {
-  // 三处 2026-10-17 实测修正：
+export async function academicArxiv(
+  query: string,
+  limit = 8,
+  opts: { sortByDate?: boolean; fetcher?: (url: string) => Promise<string> } = {},
+): Promise<DeepResult[]> {
+  // 四处 2026-10-17 实测修正：
   // ① **https 而非 http**——http 走一次重定向，慢且偶发失败（失败又被上层吞成空数组）
   // ② **查询表达式化**（见 arxivQuery）——裸空格 OR 会灌进 75% 噪音
   // ③ **编码不能用 encodeURIComponent**（见 encodeArxivQuery）——冒号被编码 ⇒ 前缀失效
+  // ④ **按提交时间降序**（`sortBy=submittedDate`）——默认是**相关性**排序，产的是
+  //    「该主题的经典论文」而不是「新论文」（实测 A/B：默认返回 2012/2016/2019 老论文；
+  //    加参数后严格降序 2026→2025→2025→2024→2024，且首条仍是强相关）。
+  //    监控场景要的是新论文 ⇒ 由**调用方显式要求**（一次性检索仍可用相关性）。
   const q = encodeArxivQuery(arxivQuery(query))
-  const xml = await httpGet(`https://export.arxiv.org/api/query?search_query=${q}&max_results=${limit}`)
+  const sort = opts.sortByDate ? '&sortBy=submittedDate&sortOrder=descending' : ''
+  const get = opts.fetcher ?? httpGet
+  const xml = await get(`https://export.arxiv.org/api/query?search_query=${q}${sort}&max_results=${limit}`)
+  return parseArxivEntries(xml, limit)
+}
+
+/**
+ * 解析 arxiv Atom 响应 ⇒ 条目列表。
+ *
+ * **搜索与定向回填共用这一份**（判据单一真源）：两条路径若各写一套正则，
+ * 其中一条改了字段（如 `<published>` 换名）就会**静默**与另一条不一致——
+ * 而症状只是「时间未知」，看起来像源没给数据。
+ */
+export function parseArxivEntries(xml: string, limit: number): DeepResult[] {
   const entries = xml.split(/<entry>/i).slice(1)
   return entries.slice(0, limit).map((e) => {
     const title = stripTags(e.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '')
@@ -89,6 +110,36 @@ export async function academicArxiv(query: string, limit = 8): Promise<DeepResul
     const published = e.match(/<published[^>]*>([\s\S]*?)<\/published>/i)?.[1]?.slice(0, 10) ?? ''
     return { title, url: id.trim(), snippet: summary, source: 'arxiv', extra: { published } }
   })
+}
+
+/**
+ * 从 arxiv URL 提取 id（`https://arxiv.org/abs/1612.05413v1` ⇒ `1612.05413v1`）。
+ *
+ * 只认 `/abs/` 形态（arxiv 的规范条目 URL）；取不到返回 **null（不猜）**——
+ * 猜出来的 id 会让 `id_list` 静默返回 0 条，看起来像「源没给时间」，
+ * 而真因是「我问错了东西」（§5.9 规则 6：读数必须自带范围标注）。
+ */
+export function arxivIdFromUrl(url: string): string | null {
+  const m = String(url).match(/arxiv\.org\/abs\/([^/?#\s]+)$/i)
+  return m?.[1] ?? null
+}
+
+/**
+ * 按 **arxiv id** 定向取条目（`id_list` 端点）。
+ *
+ * 为什么需要（2026-10-17 实测）：`pickBackfill` 的有效范围 = 本轮重扫结果 ∩ 库里缺字段条目。
+ * 一旦查询变更（`arxiv-deepweb` 三次重建）或源侧排序漂移，这个交集会**归零**
+ * ⇒ 旧条目永远补不上时间（实测 23 条全缺，而同 query 未变的另一目标补上了 9 条）。
+ * ⇒ 回填不能指望「重扫恰好又返回它」，要按**条目标识**直接问源。
+ *
+ * `ids` 形如 `1612.05413v1`（**带版本号**：库里 URL 带 vN，要与源返回的 id 对得上，
+ * 否则 `fingerprint` 归一后仍不匹配）。
+ */
+export async function arxivByIds(ids: string[], fetcher?: (url: string) => Promise<string>): Promise<DeepResult[]> {
+  if (ids.length === 0) return []
+  const get = fetcher ?? httpGet
+  const xml = await get(`https://export.arxiv.org/api/query?id_list=${ids.join(',')}&max_results=${ids.length}`)
+  return parseArxivEntries(xml, ids.length)
 }
 
 export async function academicCrossref(query: string, limit = 8): Promise<DeepResult[]> {
@@ -131,6 +182,8 @@ export async function searchAcademic(
   source?: AcademicSource,
   limit = 8,
   onError?: (source: AcademicSource, e: unknown) => void,
+  // ⚠ 位置参数已到 5 个——下次动这里应合并成 options 对象（现在加第 5 个是为了**不破坏**既有调用方）。
+  opts: { arxivSortByDate?: boolean } = {},
 ): Promise<DeepResult[]> {
   const srcs = source ? [source] : ACADEMIC_SOURCES
   const jobs = srcs.map((s) => {
@@ -139,7 +192,7 @@ export async function searchAcademic(
       return []
     }
     if (s === 'semantic') return academicSemanticScholar(query, limit).catch(fail)
-    if (s === 'arxiv') return academicArxiv(query, limit).catch(fail)
+    if (s === 'arxiv') return academicArxiv(query, limit, { ...(opts.arxivSortByDate ? { sortByDate: true } : {}) }).catch(fail)
     if (s === 'crossref') return academicCrossref(query, limit).catch(fail)
     return academicOpenAlex(query, limit).catch(fail)
   })
