@@ -34,6 +34,18 @@ export interface ApiSpec {
    * 「新发布」与「新发现」被混为一谈，而推送判据里写着「且有时效性」却**无从计算**。
    */
   timePath?: string
+  /**
+   * 单次扫描的条目上限（**防灌全量**· 2026-11-03 · t-df1b9eeb）。
+   *
+   * 为什么需要：`api` 源的语义是「**声明式精选**」（itemsPath 指向的就是目标集合），
+   * 但「精选」不等于「小」——**端点大小与信噪比无关**。实测 Coinbase
+   * `api.exchange.coinbase.com/products`（交易对列表，根数组 300+ 条）若接入，
+   * 首扫会一次性入库 300+ 条，其中绝大多数是「一直就在那儿」的存量。
+   *
+   * 缺省 **不截断**（保持既有源行为不变）。配了就必须**如实报**截断了多少——
+   * 不报的话「这个源只有 20 条」与「我截到 20 条」在读数上同形。
+   */
+  maxItems?: number
 }
 
 export interface ApiCandidate {
@@ -57,6 +69,16 @@ export interface ApiMapResult {
   notes: string[]
   /** 结构性失败（itemsPath 取不到 / 非数组）——源级故障，必须让读数可见 */
   errors: string[]
+  /**
+   * 端点在 `itemsPath` 处的**原始条目数**（截断前）——2026-11-03 · t-df1b9eeb。
+   *
+   * 与 `items.length` 分开的理由：「端点给了 300 条」与「我收下 20 条」是两件事。
+   * 只报后者会让大端点看起来很小，而「端点有多大」正是判断要不要配 `maxItems` 的依据。
+   * 取不到数组时记 0（那是错误路径，`errors` 已经说清了）。
+   */
+  rawCount: number
+  /** 因 `maxItems` 被丢掉的条数（未截断时不出现） */
+  truncated?: number
 }
 
 /**
@@ -150,7 +172,7 @@ export function mapApiItems(json: unknown, spec: ApiSpec): ApiMapResult {
   const errors: string[] = []
   const arr = pickPath(json, spec.itemsPath)
   if (arr === undefined) {
-    return { items: [], skipped: 0, notes: [], errors: [`itemsPath 取不到：${spec.itemsPath}（检查路径与响应形状）`] }
+    return { items: [], skipped: 0, notes: [], errors: [`itemsPath 取不到：${spec.itemsPath}（检查路径与响应形状）`], rawCount: 0 }
   }
   if (!Array.isArray(arr)) {
     return {
@@ -158,6 +180,7 @@ export function mapApiItems(json: unknown, spec: ApiSpec): ApiMapResult {
       skipped: 0,
       notes: [],
       errors: [`itemsPath 指向的不是数组：${spec.itemsPath}（实际 ${typeof arr}）`],
+      rawCount: 0,
     }
   }
 
@@ -198,5 +221,13 @@ export function mapApiItems(json: unknown, spec: ApiSpec): ApiMapResult {
   if (skipped > 0) notes.push(`跳过 ${skipped}/${arr.length} 条（缺 id 或模板字段）`)
   // 时间解析失败必须显形：不报的话「源改了时间字段名」会被读成「这批公告没有发布时间」
   if (timeKey && noTime > 0) notes.push(`时间解析失败 ${noTime}/${arr.length} 条（字段 ${timeKey}）`)
-  return { items, skipped, notes, errors }
+  // 截断（2026-11-03 · t-df1b9eeb）：`maxItems` 是**上界**，不是「只取前 N 条里最好的」——
+  // 它防的是「首扫把大端点的存量全灌进库」，代价是可能丢掉真正的新条目。
+  // 所以截断必须**如实报**：不报的话「这个源只有 20 条」与「我截到 20 条」在读数上同形。
+  if (spec.maxItems !== undefined && items.length > spec.maxItems) {
+    const dropped = items.length - spec.maxItems
+    notes.push(`按 maxItems 截断：${items.length} → ${spec.maxItems} 条（丢 ${dropped} 条）`)
+    return { items: items.slice(0, spec.maxItems), skipped, notes, errors, rawCount: arr.length, truncated: dropped }
+  }
+  return { items, skipped, notes, errors, rawCount: arr.length }
 }

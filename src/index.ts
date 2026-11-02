@@ -1155,6 +1155,11 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         description:
           'kind=api：发布时间字段名（如币安 releaseDate / OKX pTime）——毫秒/秒时间戳或 ISO 字符串。配上它，「时效性」才有依据；不配则该源条目一律显示「时间未知」（不是「刚发布」）',
       },
+      maxItems: {
+        type: 'number',
+        description:
+          'kind=api：单次扫描的条目上界（防灌全量）。缺省不截断——「声明式精选」不等于「端点小」，大端点（如交易对列表 300+ 条）首扫会把存量全灌进库。截断后摘要会如实报「候选 N 条 → 收 M 条」',
+      },
       scanMinutes: {
         type: 'number',
         description:
@@ -1191,7 +1196,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           // 2026-10-17 补：此前 update 只能改 note（U19 登记的未决项），
           // 于是「给已有 api 源补 timePath」这种改法在工具面上**不存在**，
           // 只能手改 targets.json（绕过工具面 = 绕过留痕）。
-          const specKeys = ['url', 'domain', 'query', 'itemsPath', 'idPath', 'titlePath', 'urlTemplate', 'timePath', 'maxPages', 'maxDepth'] as const
+          const specKeys = ['url', 'domain', 'query', 'itemsPath', 'idPath', 'titlePath', 'urlTemplate', 'timePath', 'maxItems', 'maxPages', 'maxDepth'] as const
           const specPatch: Record<string, unknown> = {}
           for (const k of specKeys) {
             if (args[k] !== undefined) specPatch[k] = args[k]
@@ -1250,6 +1255,9 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
           if (args.titlePath) spec.titlePath = args.titlePath
           if (args.urlTemplate) spec.urlTemplate = args.urlTemplate
           if (args.timePath) spec.timePath = args.timePath
+          // ⚠ 用 `!== undefined` 而不是 truthy：`maxItems: 0` 是**合法上界**
+          // （全部截掉），写成 `if (args.maxItems)` 会把它静默当成「不限制」。
+          if (args.maxItems !== undefined) spec.maxItems = args.maxItems
         } else {
           if (!args.query) return { ok: false, error: 'kind=arxiv 需要 query' }
           spec.query = args.query

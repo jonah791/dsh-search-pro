@@ -95,6 +95,14 @@ export interface IntelTarget {
     urlTemplate?: string
     /** api：发布时间字段名（如币安 `releaseDate` / OKX `pTime`）——毫秒/秒时间戳或 ISO 字符串 */
     timePath?: string
+    /**
+     * api：单次扫描的条目上界（防灌全量 · 2026-11-03 · t-df1b9eeb）。
+     *
+     * ⚠ 这个内联 `spec` 类型是**手抄** `ApiSpec` 的一份——加字段要改两处
+     * （这里 + `intel-api.ts` 的 `ApiSpec`），漏一处的表现是「工具面能配、
+     * 扫描时不生效」，而静态检查只在**用到该字段**时才报错（本次就是编译抓到的）。
+     */
+    maxItems?: number
   }
   note?: string
   createdAt: string

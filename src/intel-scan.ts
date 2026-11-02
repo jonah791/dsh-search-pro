@@ -89,6 +89,14 @@ interface Collected {
   error?: string
   /** 源级**故障**（与 gaps 的覆盖缺口分开：CC 504 / crt.sh 502 属此类） */
   sourceErrors?: string[]
+  /**
+   * 端点在取数处的**原始条目数**（截断/跳过**之前**）——2026-11-03 · t-df1b9eeb。
+   *
+   * 缺省 = 没有额外口径可用（site/domain/arxiv 的 `found.length` 就是原始数）。
+   * api 源配上 `maxItems` 时**必须**带这个：否则「端点给了 300 条、我收下 20 条」
+   * 会被报成「只有 20 条」，而那个读数正是下次决定要不要调上界的依据。
+   */
+  rawCount?: number
 }
 
 /** 取数：把 target 变成一组候选 */
@@ -194,12 +202,18 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
         ...(target.spec.titlePath ? { titlePath: target.spec.titlePath } : {}),
         ...(target.spec.urlTemplate ? { urlTemplate: target.spec.urlTemplate } : {}),
         ...(target.spec.timePath ? { timePath: target.spec.timePath } : {}),
+        // ⚠ 这里**逐字段拼** spec，漏一个字段就等于「配了但不生效」——
+        // 2026-11-03 加 maxItems 时正是差点漏掉这处（字段、类型、工具参数都加了，
+        // 唯独消费点没接 ⇒ 行为完全不变，而任何静态检查都不会报错）。
+        ...(target.spec.maxItems !== undefined ? { maxItems: target.spec.maxItems } : {}),
       })
       return {
         found: mapped.items,
         // 结构性失败 ⇒ 源级故障（让读数可见）；跳过计数 ⇒ 覆盖缺口（不误报「源在坏」）
         sourceErrors: mapped.errors.map((e) => `api: ${e}`),
         gaps: mapped.notes.map((e) => `api: ${e}`),
+        // 端点原始数（截断前）——与 found.length 不同时，说明 maxItems 起了作用
+        rawCount: mapped.rawCount,
       }
     } catch (e) {
       return { found: [], sourceErrors: [`api: ${e instanceof Error ? e.message : String(e)}`] }
@@ -304,7 +318,7 @@ async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: Scan
   // （雪球）。这一项把「权威库（items.jsonl）」与「缓存快照」重新对齐，是治本项。
   for (const id of persisted) next.add(id)
   for (const f of collected.found) next.add(normalizeItem({ url: f.url, targetId: target.id, now }).id)
-  store.saveSnapshot(target.id, [...next], { lastScanAt: now, rawCount: collected.found.length })
+  store.saveSnapshot(target.id, [...next], { lastScanAt: now, rawCount: collected.rawCount ?? collected.found.length })
   store.patchTarget(target.id, { lastScanAt: now, foundTotal: next.size })
 
   const sourceErrors = collected.sourceErrors ?? []
@@ -347,7 +361,7 @@ async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: Scan
     sourceErrors: sourceErrors.length > 0 ? sourceErrors : undefined,
     elapsedMs: Date.now() - t0,
     items,
-    rawCount: collected.found.length,
+    rawCount: collected.rawCount ?? collected.found.length,
     ...(backfilled > 0 ? { backfilled } : {}),
   }
 }
