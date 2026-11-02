@@ -12,6 +12,7 @@ import { discoverSite } from './discover-site.js'
 import { discoverUrls } from './discover-fetch.js'
 import { arxivByIds, arxivIdFromUrl, searchAcademic } from './deep.js'
 import { mapApiItems, publishedAtFromExtra } from './intel-api.js'
+import type { TimeSource } from './published-at.js'
 import { diffNew, fingerprint, isIntelWorthy, normalizeItem, pickBackfill, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
 import type { IntelStore } from './intel-store.js'
 
@@ -82,7 +83,7 @@ export async function backfillArxivByIds(
 }
 
 interface Collected {
-  found: Array<{ url: string; title?: string; source?: string; mime?: string; publishedAt?: string }>
+  found: Array<{ url: string; title?: string; source?: string; mime?: string; publishedAt?: string; publishedAtFrom?: TimeSource }>
   confidence?: string
   gaps?: string[]
   error?: string
@@ -104,9 +105,11 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
     // 返回的是纯 URL 字符串（时间在源侧就没取），与 api/arxiv 那两个实例**不同型**。
     // 现在 discoverSite 旁挂 `times`（带来源标注），这里透成 `publishedAt`。
     // 抽不到的项**不带该键** ⇒ 渲染层如实显示「时间未知」，不用抓取时刻冒充。
-    const timeOf = (u: string): { publishedAt?: string } => {
+    // 2026-11-03（t-aeb619c7）：`from` 原先在这里被丢掉 ⇒ 来源可信度止于本轮读数。
+    // `meta`（页面自己声明）与 `page`（附件继承文章页，代理量）在条目里必须可分辨。
+    const timeOf = (u: string): { publishedAt?: string; publishedAtFrom?: TimeSource } => {
       const t = s.times[u]
-      return t ? { publishedAt: t.at } : {}
+      return t ? { publishedAt: t.at, publishedAtFrom: t.from } : {}
     }
     const found = [
       ...s.pages.map((u) => ({ url: u, source: 'crawl', ...timeOf(u) })),
@@ -266,6 +269,7 @@ async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: Scan
         title: f.title,
         mime: f.mime,
         ...(f.publishedAt ? { publishedAt: f.publishedAt } : {}),
+        ...(f.publishedAt && f.publishedAtFrom ? { publishedAtFrom: f.publishedAtFrom } : {}),
         now,
       }),
     )
@@ -281,7 +285,14 @@ async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: Scan
   if (collected.found.some((f) => f.publishedAt)) {
     const knownItems = store.listItems({ targetId: target.id, limit: 0 }).items
     const toBackfill = pickBackfill(collected.found, knownItems)
-    for (const b of toBackfill) store.patchItem(b.id, { publishedAt: b.publishedAt })
+    for (const b of toBackfill) {
+      // 回填时 `from` **必须同时补写**——只补时间不补来源，会让这批条目在渲染层
+      // 被当成「直接信号」，而它们其实和本轮新条目拿到的是同一份证据。
+      store.patchItem(b.id, {
+        publishedAt: b.publishedAt,
+        ...(b.publishedAtFrom ? { publishedAtFrom: b.publishedAtFrom } : {}),
+      })
+    }
     backfilled = toBackfill.length
   }
   // 快照 = 已知 ∪ **本轮扫到的全部候选**（含被 worthy 过滤掉的）——

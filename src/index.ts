@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, intelUnreadBreakdown, renderIntelUnreadLine, isStructuralPage, isHighValue, kindTag, ageLabel, ageHours, dueTargetIds, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, intelUnreadBreakdown, renderIntelUnreadLine, isStructuralPage, isHighValue, kindTag, ageLabel, ageLabelWithSource, ageHours, dueTargetIds, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -1511,7 +1511,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
             const tag = kindTag(it.kind)
             // 时效进**推送文本**：读的人必须在文本里看见它，
             // 否则「这条还值不值得推」只能靠猜
-            lines.push(`${tag} ${ageLabel(it.publishedAt)} ${it.title || it.url}`)
+            lines.push(`${tag} ${ageLabelWithSource(it.publishedAt, it.publishedAtFrom)} ${it.title || it.url}`)
             if (it.title) lines.push(`   ${it.url}`)
           }
         }
@@ -1757,7 +1757,7 @@ export function renderIntelScan(_a: any, v: any): any[] {
     parts.push(`## 新增条目（${items.length}）`)
     for (const it of items.slice(0, 20)) {
       const tag = kindTag(it.kind)
-      parts.push(`· ${tag} ${ageLabel(it.publishedAt)} ${it.title || it.url}${it.source ? ` (${it.source})` : ''}`)
+      parts.push(`· ${tag} ${ageLabelWithSource(it.publishedAt, it.publishedAtFrom)} ${it.title || it.url}${it.source ? ` (${it.source})` : ''}`)
     }
     if (items.length > 20) parts.push(`… 另有 ${items.length - 20} 条`)
   } else if (v.okCount > 0) {
@@ -1794,7 +1794,7 @@ export function renderIntelList(_a: any, v: any): any[] {
       // 时效与发现时间**并列显示**（2026-10-17）：两者语义不同——
       // foundAt 是「我什么时候扫到的」，publishedAt 是「源什么时候发的」。
       // 只显示前者会让 16 天前的公告看起来像今天的新情报。
-      parts.push(`· [${it.kind}/${it.status}] ${when} · ${ageLabel(it.publishedAt)} \`${it.targetId}\``)
+      parts.push(`· [${it.kind}/${it.status}] ${when} · ${ageLabelWithSource(it.publishedAt, it.publishedAtFrom)} \`${it.targetId}\``)
       if (it.title) parts.push(`  ${it.title}`)
       parts.push(`  ${it.url}`)
     }

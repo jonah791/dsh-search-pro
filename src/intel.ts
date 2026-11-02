@@ -12,6 +12,7 @@
  */
 
 import { isAttachment, isMetaFile } from './discover.js'
+import type { TimeSource } from './published-at.js'
 
 /** 情报条目 */
 export interface IntelItem {
@@ -36,6 +37,18 @@ export interface IntelItem {
    * 缺省 = **源没给**（不是「刚发布」）——渲染时必须显示为「时间未知」。
    */
   publishedAt?: string
+  /**
+   * `publishedAt` 的**来源**（2026-11-03 · t-aeb619c7）。
+   *
+   * 为什么它是字段而不是渲染细节：`meta` 是**直接信号**（页面自己声明的发布时间），
+   * `page` 是**代理量**（附件继承所在文章页的时间——附件的真实发布时间可能更早）。
+   * 两者都进 `publishedAt` 之后，读者无法分辨「这条是源说的」还是「我推的」。
+   * `from` 原先只在 `discoverSite` 的 `times` 里存在过就丢了 ⇒ 把「可信度」这条
+   * 判据消耗在了中间层。
+   *
+   * 缺省 = **不知道来源**（存量条目 / 源没给）——渲染时按直接信号显示，不补造标记。
+   */
+  publishedAtFrom?: TimeSource
   status: 'new' | 'seen' | 'starred' | 'dropped'
   /**
    * 已分诊、待读（与 status **正交**）—— 2026-11-03 新增。
@@ -295,6 +308,8 @@ export interface NormalizeInput {
   status?: IntelItem['status']
   /** 源侧发布时间（ISO；源没给就不传——缺省**不是**「现在」） */
   publishedAt?: string
+  /** 该时间的来源（缺省 = 不知道；与 `publishedAt` 同进同退） */
+  publishedAtFrom?: TimeSource
 }
 
 /** 把发现结果规整成情报条目（指纹即 id，天然幂等） */
@@ -308,6 +323,9 @@ export function normalizeItem(raw: NormalizeInput): IntelItem {
     ...(raw.title ? { title: raw.title } : {}),
     foundAt: raw.now ?? new Date().toISOString(),
     ...(raw.publishedAt ? { publishedAt: raw.publishedAt } : {}),
+    // 来源与时间**同进同退**：没有时间就不可能有「这个时间的来源」，
+    // 带上孤立的 from 会让读者以为它描述的是别的东西。
+    ...(raw.publishedAt && raw.publishedAtFrom ? { publishedAtFrom: raw.publishedAtFrom } : {}),
     status: raw.status ?? 'new',
     ...(raw.source ? { source: raw.source } : {}),
     ...(raw.mime || raw.meta ? { meta: { ...(raw.mime ? { mime: raw.mime } : {}), ...(raw.meta ?? {}) } } : {}),
@@ -340,6 +358,31 @@ export function ageLabel(publishedAt: string | undefined, now: number = Date.now
 }
 
 /**
+ * 带**来源标记**的时效标签（2026-11-03 · t-aeb619c7）。
+ *
+ * 为什么不给 `ageLabel` 加参数：它的第二参是 `now`，把 `from` 插在中间会让所有
+ * 「传了 now」的调用静默改义（现有测试就在传 `ageLabel(undefined, now)`）。
+ * ⇒ 不插队，另开一个包装。
+ *
+ * **只标弱信号**，因为标记的意义是「提醒这个时间不是我亲眼看见源说的」：
+ * - `page` ⇒ `≈`（继承自所在文章页——附件的真实发布时间可能更早，是代理量）
+ * - `url`  ⇒ `~`（URL 路径里的完整日期段，可能是目录结构而非发布时间）
+ * - `meta` / `time-tag` / 缺省 ⇒ 不加标记（直接信号；缺省**不补造**来源）
+ */
+export function ageLabelWithSource(
+  publishedAt: string | undefined,
+  from: TimeSource | undefined,
+  now: number = Date.now(),
+): string {
+  const base = ageLabel(publishedAt, now)
+  // 时间未知时不标来源：来源描述的是「那个时间」，没有时间就没有被描述的对象。
+  // （这也是判据④：无 publishedAt 的条目不得出现 publishedAtFrom 的渲染侧对应。）
+  if (base === '时间未知') return base
+  const mark = from === 'page' ? '≈' : from === 'url' ? '~' : ''
+  return mark + base
+}
+
+/**
  * 存量回填：**给已落盘的条目补上后加的字段**。
  *
  * 为什么必须有（2026-10-17 实测）：`diffNew` 按 URL 指纹去重 ⇒ 已报过的条目
@@ -351,20 +394,22 @@ export function ageLabel(publishedAt: string | undefined, now: number = Date.now
  * 返回**要补写的清单**（纯函数不落盘；落盘由调用方做）。
  */
 export function pickBackfill(
-  found: Array<{ url: string; publishedAt?: string }>,
+  found: Array<{ url: string; publishedAt?: string; publishedAtFrom?: TimeSource }>,
   known: IntelItem[],
-): Array<{ id: string; publishedAt: string }> {
+): Array<{ id: string; publishedAt: string; publishedAtFrom?: TimeSource }> {
   const byId = new Map(known.map((i) => [i.id, i]))
-  const out: Array<{ id: string; publishedAt: string }> = []
+  const out: Array<{ id: string; publishedAt: string; publishedAtFrom?: TimeSource }> = []
   const seen = new Set<string>()
   for (const f of found) {
     if (!f.publishedAt) continue
     const id = fingerprint(f.url)
     if (seen.has(id)) continue
     const cur = byId.get(id)
+    // 已有 publishedAt 的条目**不补**（含不补 from）：幂等优先。
+    // 代价是存量条目永远拿不到来源——如实标注，不假装能回填（见 t-aeb619c7）。
     if (!cur || cur.publishedAt) continue
     seen.add(id)
-    out.push({ id, publishedAt: f.publishedAt })
+    out.push({ id, publishedAt: f.publishedAt, ...(f.publishedAtFrom ? { publishedAtFrom: f.publishedAtFrom } : {}) })
   }
   return out
 }
