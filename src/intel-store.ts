@@ -185,11 +185,22 @@ export class IntelStore {
   }
 
   /** 列条目（按发现时间降序；可按目标/状态/**时间窗**过滤） */
-  listItems(opts: { targetId?: string; status?: string; limit?: number; since?: string } = {}): ItemsLoad & { filtered: number } {
+  listItems(opts: { targetId?: string; status?: string; limit?: number; since?: string; includeTriaged?: boolean } = {}): ItemsLoad & { filtered: number } {
     const { items, badLines } = this.loadItems()
     let out = items
     if (opts.targetId) out = out.filter((i) => i.targetId === opts.targetId)
-    if (opts.status) out = out.filter((i) => i.status === opts.status)
+    if (opts.status) {
+      out = out.filter((i) => i.status === opts.status)
+      // 「未读」= status=new **∧ 未分诊**（2026-11-03）。
+      //
+      // 分诊过的条目位置已经推进（我看过了、知道它是什么、只是还没读），
+      // 不该继续占「待判」的位置。否则把一批论文分诊完这个合法动作，
+      // 只能靠伪称 seen（读过）或 dropped（没价值）才能让它们离开视野。
+      //
+      // ⚠ 只在 status='new' 下生效：查 seen/starred/dropped 时分诊与否无关紧要。
+      // ⚠ 存量 864 条都无此字段 ⇒ `!i.triaged` 恒真 ⇒ **行为不变**（安全）。
+      if (opts.status === 'new' && !opts.includeTriaged) out = out.filter((i) => !i.triaged)
+    }
     // 时间窗（2026-10-17 · 推送场景）：推送的本质是**增量通知**，不是全量列表。
     // ⚠ 语义是 **foundAt（发现时间）**，不是源侧发布时间——对站点类目标，
     // 一个 2018 年的老附件今天才被扫到，它的 foundAt 就是今天（它确实是**新情报**）。

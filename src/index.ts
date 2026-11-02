@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, isStructuralPage, isHighValue, kindTag, ageLabel, ageHours, dueTargetIds, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, intelUnreadBreakdown, renderIntelUnreadLine, isStructuralPage, isHighValue, kindTag, ageLabel, ageHours, dueTargetIds, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -245,14 +245,23 @@ function renderSiteDiscover(_a: any, v: any): any[] {
 }
 
 export function apply(ctx: Context, config: Config): void {  const logger = ctx.logger('search-pro')
-  // tavilyKey 单一来源（2026-09-06 凭据迁移）：config 优先（兼容旧配置）→ .credentials.yaml refs 兜底。
-  if (!config.tavilyKey) {
+  /** 凭据库读取（单一入口）：按**键名**从 `.credentials.yaml` 的 `refs` 段取一个值。
+   *  为什么抽成函数：2026-10-17 接入 `DEEPSEEK_API_KEY` 时发现这段「读文件 + 正则取值」要写第三遍——
+   *  **第三遍就是该抽的信号**（§5.34 可重构性）。
+   *  方向：`config` 优先是**兼容旧配置**的遗留路径；**新 key 一律直接住凭据库**，不再往 config 加字段。 */
+  const credKey = (name: string): string => {
     try {
       const cred = readFileSync(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), '.credentials.yaml'), 'utf8')
-      const m = cred.match(/^\s*TAVILY_API_KEY:\s*(\S+)/m)
-      if (m && m[1]) config.tavilyKey = m[1]
-    } catch { /* 无凭据文件 */ }
+      const m = cred.match(new RegExp(`^\\s*${name}:\\s*(\\S+)`, 'm'))
+      return m?.[1] ?? ''
+    } catch {
+      return '' // 「没有凭据文件」与「文件坏了」都不该拖垮插件（§5.24）；由调用方按空串处理
+    }
   }
+  // tavilyKey 单一来源（2026-09-06 凭据迁移）：config 优先（兼容旧配置）→ .credentials.yaml refs 兜底。
+  if (!config.tavilyKey) config.tavilyKey = credKey('TAVILY_API_KEY')
+  // DeepSeek 官方 Search API（2026-10-17 主人交办「配置到内置搜索」）：新 key ⇒ 只走凭据库。
+  const deepseekKey = credKey('DEEPSEEK_API_KEY')
   const store = new SearchStore((config.cacheTtlMinutes ?? 60) * 60_000)
   // 情报库：构造失败**不拖垮整个插件**（§5.24 逃逸异常 = 宿主死因）——降级成「情报工具响亮报错」
   let intelStore: IntelStore | null = null
@@ -352,15 +361,12 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         if (!intelStore) return ''
         const { items: unread } = intelStore.listItems({ status: 'new' })
         if (unread.length === 0) return ''
-        // 分层读数（2026-10-16 实测驱动）：161 条未读里 118 条是页面噪音
-        // ⇒ 「N 条未读」这个数字**没有分辨力**——信噪比必须进读数本身，
-        // 否则我看到「160 条未读」会以为有大量情报，实际高价值的只有几十条。
-        // 判据走 isHighValue（单一真源）：新增高价值 kind 时只改一处。
-        const high = unread.filter((i) => isHighValue(i.kind)).length
-        const low = unread.length - high
+        // 按「这个数字对应的正确动作」分段（2026-11-03）——算法与文案见
+        // intelUnreadBreakdown / renderIntelUnreadLine（纯函数，有单测锁定口径）。
+        // 抽成纯函数的理由：这是**读数正确性**，散在闭包里就只能靠重启后肉眼看。
         const st = readIntelStatus()
         const last = st?.lastScanAt ? localStamp(String(st.lastScanAt)) : '未扫过'
-        return `情报库：${high} 条高价值未读（附件/论文/api）+ ${low} 条页面 · 上次扫描 ${last}（intel_digest 看内容 / intel_scan 立刻扫）`
+        return renderIntelUnreadLine(intelUnreadBreakdown(unread), last)
       } catch {
         return ''
       }
@@ -445,10 +451,10 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
   /* ── B · 表层检索组 ── */
   reg({
     name: 'search_web',
-    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Bing 免费 + 可选 Tavily/Serper API；**brave 实测 100% HTTP 429 已移出默认组**），聚合去重，并回报**逐通道读数**（channels：谁出结果、谁空手、为什么空手）。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
+    description: '通用多引擎搜索（parallel=无钥匙·密集摘录 / searxng=自托管 / DuckDuckGo / Bing 免费 + 可选 Tavily/Serper API + **deepseek=DeepSeek 官方引擎（唯一带 rerank_score 质量分，计费，须显式指定）**；**brave 实测 100% HTTP 429 已移出默认组**），聚合去重，并回报**逐通道读数**（channels：谁出结果、谁空手、为什么空手）。一次性多查询扇出用 extraQueries+objective（省掉链式重搜）。支持 timeRange 时间过滤（只对 duckduckgo 生效）搜新资源。长尾信息优先用 search_deep 系列。',
     parameters: {
       query: { type: 'string', required: true, description: '搜索词' },
-      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper'] }, description: '引擎列表（默认 parallel+searxng+duckduckgo+bing；brave 已移出默认组）' },
+      engines: { type: 'array', items: { type: 'string', enum: ['parallel', 'searxng', 'duckduckgo', 'brave', 'bing', 'tavily', 'serper', 'deepseek'] }, description: '引擎列表（默认 parallel+searxng+duckduckgo+bing；brave 已移出默认组；**deepseek 是计费通道，不在默认组，须显式指定**）' },
       lang: { type: 'string', description: '语言提示' },
       pages: { type: 'number', description: '翻页深度 1-3（默认 1）' },
       objective: { type: 'string', description: 'Parallel：自然语言说明「要找什么」（缺省＝query）' },
@@ -464,7 +470,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
       const channels: any[] = []
       const r = await safe(() => searchWeb({
         query: args.query, engines: args.engines, lang: args.lang ?? config.defaultLang,
-        pages: args.pages, tavilyKey: config.tavilyKey, serperKey: config.serperKey, timeRange: args.timeRange,
+        pages: args.pages, tavilyKey: config.tavilyKey, serperKey: config.serperKey, deepseekKey, timeRange: args.timeRange,
         searxngBase: config.searxngBase, objective: args.objective, sessionId: args.sessionId, extraQueries: args.extraQueries,
         searxngGate: config.searxngGate, searxngReadyTimeoutMs: config.searxngReadyTimeoutMs,
         searxngKeepAliveMinutes: config.searxngKeepAliveMinutes, searxngBudgetMs: config.searxngBudgetMs,
@@ -1355,6 +1361,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
       itemId: { type: 'string', description: '（可选）要改状态的单条 id' },
       itemIds: { type: 'array', items: { type: 'string' }, description: '（可选）批量改状态：id 数组（优先于 itemId）——存量清理用，逐条现算成败' },
       setStatus: { type: 'string', enum: ['new', 'seen', 'starred', 'dropped'], description: '（可选）改成的状态——与 itemId / itemIds 同传' },
+      markTriaged: { type: 'boolean', description: '（可选）把 itemId / itemIds 标为「已分诊待读」——与 setStatus 二选一。用途：把一批条目分诊完，让它们离开「未读」视野，**而不必伪称 seen（读过）或 dropped（没价值）**。status 不受影响' },
     },
     output: {
       schema: resultsSchema({
@@ -1370,8 +1377,20 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
       const s = intelStore
       try {
         const batch: string[] = Array.isArray(args.itemIds) && args.itemIds.length ? args.itemIds : args.itemId ? [args.itemId] : []
+        // 分诊（2026-11-03）：与改 status **正交**——分诊过 ≠ 读过。
+        // 走 patchItem 而非 updateStatus：status 是「我的裁决」，triaged 是「流程位置」。
+        if (batch.length && args.markTriaged === true) {
+          const missing = batch.filter((id) => !s.patchItem(id, { triaged: true }))
+          const okCount = batch.length - missing.length
+          return {
+            ok: missing.length === 0,
+            count: 0,
+            note: `分诊 ${okCount}/${batch.length} 条 → 已分诊待读（已移出「未读」视野，status 未改）${missing.length ? ` · 未找到 ${missing.length} 条：${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ' …' : ''}` : ''}`,
+            results: [],
+          }
+        }
         if (batch.length && !args.setStatus) {
-          return { ok: false, count: 0, note: '给了 itemId/itemIds 但缺 setStatus——改状态必须指明目标状态（否则参数被静默忽略）', results: [] }
+          return { ok: false, count: 0, note: '给了 itemId/itemIds 但缺 setStatus 或 markTriaged——必须指明要做什么（否则参数被静默忽略）', results: [] }
         }
         if (batch.length) {
           // 逐条现算成败：**未找到必须响亮报出**——静默算成功会让「标了 18 条」变成假读数
@@ -1658,12 +1677,21 @@ export function renderIntelWatch(_a: any, v: any): any[] {
     lines.push(`## 监控目标（${ts.length}）`)
     for (const t of ts) {
       const spec = t.spec?.url ?? t.spec?.domain ?? t.spec?.query ?? '?'
+      // 结果态必须显形（2026-10-31）：`lastScanAt` 在失败时也推进 ⇒ 只有时间的话，
+      // 连续 429 的源与健康源在唯一巡检视图里**逐字相同**（2026-10-17 arxiv-deepweb 实测）。
+      // 三态：failed 响亮标出 / ok 不加字 / **缺字段 = 未知**（不许读成健康——这正是本条要治的病）。
+      let stateMark = ' · 结果未知'
+      if (t.lastScanState === 'ok') stateMark = ''
+      else if (t.lastScanState === 'failed') {
+        const brief = t.lastScanError && t.lastScanError.length > 80 ? `${t.lastScanError.slice(0, 80)}…` : t.lastScanError
+        stateMark = brief ? ` ⚠ 上次失败：${brief}` : ' ⚠ 上次失败'
+      }
       const last = t.lastScanAt ? `上次 ${localStamp(t.lastScanAt)}` : '未扫过'
       const extra = t.spec?.maxPages ? ` · 上界 ${t.spec.maxPages}` : ''
       // 扫描周期必须显形（2026-10-17）：它是「快源会不会被全局拖住」的唯一读数——
       // 不显示的话，「我给它设了 30 分钟」在工具面上**无法复核**
       const period = t.scanMinutes ? ` · 每 ${t.scanMinutes} 分钟` : ''
-      lines.push(`· \`${t.id}\` [${t.kind}] ${spec}${extra}${period} · ${last}${t.note ? ` · ${t.note}` : ''}`)
+      lines.push(`· \`${t.id}\` [${t.kind}] ${spec}${extra}${period} · ${last}${stateMark}${t.note ? ` · ${t.note}` : ''}`)
     }
   } else if (isListResponse && !v.target) {
     lines.push('（尚无监控目标——用 intel_watch action=add 登记）')

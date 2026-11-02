@@ -215,6 +215,54 @@ export async function searchSerper(query: string, key: string, maxResults = 10):
   }))
 }
 
+/** DeepSeek 官方 Search API（需 key · `POST https://api.deepseek.com/v1/tools/search`）
+ *  2026-10-17 接入（主人交办「配置到内置搜索」）。端点/字段以官方文档为准：
+ *  https://api-docs.deepseek.com/zh-cn/guides/search
+ *
+ *  与其它通道的**结构性差异**：它返回 `rerank_score`（0～3，官方口径 ≥1.5 为优质，
+ *  综合相关性/权威性/时效性）——**唯一自带质量分的通道**，故本通道按该分降序排。
+ *  ⚠ 该分只在**函数内部**用于排序，**不进 `SearchResult`**（output schema 是
+ *  `additionalProperties:false` 的严格校验，凭空加字段会让工具整体失败——
+ *  见 `dsh-plugin-pitfalls`「output.schema 严格返回值校验」）。要把它暴露给模型，
+ *  得走完整五跳（`persisted-field-extension`），不在本次范围。
+ *
+ *  ⚠ **计费通道**：不进 `searchWeb` 默认组，须显式 `engines:['deepseek']`。 */
+export async function searchDeepSeek(
+  query: string,
+  key: string,
+  maxResults = 10,
+  opts: { oriQuestion?: string } = {},
+): Promise<SearchResult[]> {
+  const body: Record<string, unknown> = {
+    query,
+    count: Math.max(1, Math.min(50, maxResults)), // 官方上界 50
+    need_content: false, // 正文留给 fetch 层；这里只要可判读的摘要
+  }
+  // `ori_question` = 触发搜索的**用户原始问题**，官方说它「有助于更好地理解搜索意图」——
+  // 语义与 Parallel 的 objective 完全一致，故复用同一个入参（缺省不传）。
+  if (opts.oriQuestion) body.ori_question = String(opts.oriQuestion).slice(0, 128)
+  // 不传 `localization`：它是「用于优先返回本地化搜索结果的 IP 地址」，
+  // 传真实出口 IP 属隐私面外扩，且本机出口语义并不等于主人所在地区。
+  const data = await httpPostJSON('https://api.deepseek.com/v1/tools/search', body, {
+    headers: { Authorization: `Bearer ${key}` },
+  })
+  const results: any[] = Array.isArray(data?.results) ? (data.results as any[]) : []
+  // 中间形状带上 `score`（只在本函数内用于排序），出参前剥掉——见本函数 JSDoc 的「不进 SearchResult」。
+  const mapped = results.map((r: any): { score: number; item: SearchResult } => ({
+    score: Number(r.rerank_score ?? 0),
+    item: {
+      title: String(r.title ?? r.url ?? ''),
+      url: normalizeUrl(String(r.url ?? '')),
+      // 官方字段说明里 `summary` 比 `snippet` 更完整，优先取它；截断沿用 parallel 通道的 600
+      snippet: String(r.summary || r.snippet || '').slice(0, 600),
+      source: 'deepseek',
+    } as SearchResult,
+  }))
+  const kept = mapped.filter((x) => x.item.url)
+  kept.sort((a, b) => b.score - a.score) // 高质结果前置；同分保持原序（V8 sort 稳定）
+  return kept.map((x) => x.item)
+}
+
 /** Parallel Search MCP（**无账号 / 无 key / 无卡** · 2026-09-18 实测可用）
  *  形状＝objective + 一次多查询扇出（≤4 条）+ 稳定 session_id；返回**密集摘录**（excerpts），
  *  一次调用往往即可作答，省掉「先搜再逐页抓」的多跳成本。免费档按 session_id 限速。 */
@@ -392,11 +440,13 @@ export async function searchSearxng(
 
 export interface SearchWebArgs {
   query: string
-  engines?: string[] // duckduckgo|bing|brave|tavily|serper|parallel|searxng
+  engines?: string[] // duckduckgo|bing|brave|tavily|serper|parallel|searxng|deepseek
   lang?: string
   pages?: number
   tavilyKey?: string
   serperKey?: string
+  /** DeepSeek 官方 Search API 的 key（`DEEPSEEK_API_KEY`）。计费通道 ⇒ 不在默认组。 */
+  deepseekKey?: string
   /** SearXNG 自托管实例根地址（默认 http://127.0.0.1:18788） */
   searxngBase?: string
   /** 是否过 SearXNG 就绪门（默认 true：探活 → 冷启 VM → 确保容器 → 轮询）。 */
@@ -429,6 +479,9 @@ export async function searchWeb(args: SearchWebArgs, sink?: ChannelSink): Promis
   //      留在组里只增噪音与白等。仍可显式指定 `engines:['brave']` 手动尝试（分支保留）。
   //   ② bing 补进该位置——端点改 cn.bing.com 后 11/11 次请求成功（5 查询×2 轮 + 线上 1 次），
   //      #1 恒为最权威源（百度百科 / python.org / kubernetes.io）。见 searchBing 的 JSDoc。
+  // ⚠ `deepseek`（DeepSeek 官方 Search API）**刻意不在默认组**：它是计费通道，
+  //   进默认组等于每次 `search_web` 都花钱；要用须显式 `engines:['deepseek']`
+  //   （理由与「什么情况下该改默认」见 `searchDeepSeek` 的 JSDoc）。
   const engines = args.engines?.length ? args.engines : ['parallel', 'searxng', 'duckduckgo', 'bing']
   const pages = Math.max(1, Math.min(3, args.pages ?? 1))
   const all: SearchResult[] = []
@@ -498,6 +551,13 @@ export async function searchWeb(args: SearchWebArgs, sink?: ChannelSink): Promis
     else if (e === 'brave') jobs.push(runChannel('brave', () => searchBrave(args.query, 10 * pages)))
     else if (e === 'tavily' && args.tavilyKey) jobs.push(runChannel('tavily', () => searchTavily(args.query, args.tavilyKey!, 8)))
     else if (e === 'serper' && args.serperKey) jobs.push(runChannel('serper', () => searchSerper(args.query, args.serperKey!, 10)))
+    // deepseek 与 tavily/serper 的**刻意不同**：那两者「没 key 就静默跳过」，这里没 key 要**响亮报错**——
+    // 显式点名了一个引擎却一条通道都没跑，被读成「0 条」就是静默失败（§5.10 静默失败 = 死亡温床）。
+    else if (e === 'deepseek') {
+      jobs.push(runChannel('deepseek', () => (args.deepseekKey
+        ? searchDeepSeek(args.query, args.deepseekKey!, 10 * pages, { oriQuestion: args.objective })
+        : Promise.reject(new Error('未配置 DEEPSEEK_API_KEY（凭据库 .credentials.yaml）')))))
+    }
     else if (e === 'parallel') {
       jobs.push(runChannel('parallel', () => searchParallel(args.query, 10 * pages, { objective: args.objective, sessionId: args.sessionId, extraQueries: args.extraQueries })))
     } else if (e === 'searxng') {

@@ -128,16 +128,40 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
     if (!q) return { found: [], error: 'arxiv 目标缺 spec.query' }
     // 源错误必须带出来（2026-10-17 实测：arxiv 失败曾被上层吞成「扫到 0 条 · state=ok」）
     const errs: string[] = []
+    // 窗口真源：上次扫描成功时间（扫描失败不写入 ⇒ 下次窗口自动变大、自动补漏）。
+    const sinceMs = Date.parse(String(target.lastScanAt))
+    const hasWindow = Number.isFinite(sinceMs)
     const rs = await searchAcademic(
       q,
       'arxiv',
+      // 首轮请求条数（只是探测成本，**不再是窗口大小**）：有窗口后条数由源侧 totalResults 定
       target.spec.maxPages ?? 15,
       (s, e) => {
         errs.push(`${s}: ${e instanceof Error ? e.message : String(e)}`)
       },
       // 监控要的是**新论文**，不是「该主题的经典论文」（U20 实测 A/B：默认相关性排序
       // 返回 2012/2016/2019 老论文；按提交时间降序后严格 2026→2025→2024）。
-      { arxivSortByDate: true },
+      {
+        arxivSortByDate: true,
+        // **动态时间窗**（2026-10-21 主人两度纠正「以天为单位扫描，而不是数量」「非要硬编码吗」）：
+        // 窗口＝**上次扫描到现在**，读 target.lastScanAt（上一轮扫描写入，失败则不更新 ⇒ 自动补漏）。
+        // ⇒ 零配置、无数字参数；产出多窗口不胀、产出少窗口不变窄。
+        // 首次扫描没有 lastScanAt ⇒ 不加日期过滤，退回「按条数取最新」的旧行为。
+        ...(hasWindow ? { arxivSinceMs: sinceMs } : {}),
+        // 有窗口 ⇒ 窗口是真源 ⇒ 要「窗口内每一条」，条数交给源侧 totalResults 决定
+        // （2026-10-22 主人「先把硬编码改掉」：实测 cs.AI 单日 215 / 276，
+        //  任何拍出来的条数上界在量大的那天都会漏）。
+        ...(hasWindow ? { arxivExactWindow: true } : {}),
+        // 被协议上限截断**必须可见**——否则又是一次静默缩水（§5.10）。
+        arxivOnTruncated: (total, cap) => {
+          errs.push(`truncated: 源侧窗口内 ${total} 篇 > arxiv 协议上限 ${cap}，本轮仅取前 ${cap} 篇`)
+        },
+        // **窗口下界回退一个 announce 周期**（2026-10-22 实测：arxiv 索引滞后约 22h，
+        // 现在 10-21T16:09Z 而索引最新 10-20T17:59Z，且 10-21 窗口 totalResults=0）。
+        // 不回退的后果不是「少抓一次」，是**永久漏**：今天扫 0 条 → lastScanAt 推进到此刻
+        // → 那批论文明天傍晚才进索引 → 窗口已走过它们。回退后多抓的部分由 id 去重吸收。
+        ...(hasWindow ? { arxivAnnounceOverlap: true } : {}),
+      },
     )
     const found = rs.map((r) => {
       // 论文的发布时间决定它是不是**新论文**（2026-10-17：36 条论文全「时间未知」，
@@ -185,7 +209,7 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
  * 扫一个目标并落盘增量。**快照更新与落盘在同一函数内**，
  * 保证「报过了就不会再报」这条判据不会因为调用方忘记而失效。
  */
-export async function scanTarget(target: IntelTarget, store: IntelStore, opts: ScanOpts = {}): Promise<ScanResult> {
+async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: ScanOpts = {}): Promise<ScanResult> {
   const t0 = Date.now()
   let collected: Collected
   try {
@@ -226,17 +250,26 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
   const fresh = diffNew(worthy, known)
 
   const now = new Date().toISOString()
-  const items = fresh.map((f) =>
-    normalizeItem({
-      url: f.url,
-      targetId: target.id,
-      source: f.source,
-      title: f.title,
-      mime: f.mime,
-      ...(f.publishedAt ? { publishedAt: f.publishedAt } : {}),
-      now,
-    }),
-  )
+  // ⚠ **库里已有的 id 一律不再重写**（2026-10-22 实测 bug，第二个「处理被抹掉」的原因）：
+  // 快照是**缓存**，items.jsonl 才是**权威**。快照一旦变窄（读失败 / remove+add 重建 /
+  // 保存中断），`diffNew` 会把库里已存在的条目重新判成「新」，而 `appendItems` 是
+  // **后写胜**（`normalizeItem` 的 status 缺省 'new'）⇒ 用户标过的 seen/starred/dropped
+  // 被**静默重置**成 new。实测：快照 rawCount 从 ~250 缩到 49 后，13 条 seen 被打回 new
+  // ⇒ 积压永远清不掉（今晚清库的成果会被下一轮扫描抹掉）。
+  const persisted = new Set(store.listItems({ targetId: target.id, limit: 0 }).items.map((i) => i.id))
+  const items = fresh
+    .map((f) =>
+      normalizeItem({
+        url: f.url,
+        targetId: target.id,
+        source: f.source,
+        title: f.title,
+        mime: f.mime,
+        ...(f.publishedAt ? { publishedAt: f.publishedAt } : {}),
+        now,
+      }),
+    )
+    .filter((it) => !persisted.has(it.id))
 
   if (items.length > 0) store.appendItems(items)
 
@@ -255,6 +288,10 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
   // 只记 worthy 会让被过滤的那些在下一轮「变成新的」（2026-10-16 修正：
   // 快照的语义是「我见过什么」，worthy 的语义是「其中值得报的」，两者必须分开）
   const next = new Set(known)
+  // 快照必须**只增不减**：并入库里已有的全部 id（`persisted`）。只靠 `known ∪ 本轮`
+  // 会让快照在 known 变空/变窄时**永久缩水**，缩水后下一轮把库里已有条目全部重判为新
+  // （雪球）。这一项把「权威库（items.jsonl）」与「缓存快照」重新对齐，是治本项。
+  for (const id of persisted) next.add(id)
   for (const f of collected.found) next.add(normalizeItem({ url: f.url, targetId: target.id, now }).id)
   store.saveSnapshot(target.id, [...next], { lastScanAt: now, rawCount: collected.found.length })
   store.patchTarget(target.id, { lastScanAt: now, foundTotal: next.size })
@@ -302,6 +339,37 @@ export async function scanTarget(target: IntelTarget, store: IntelStore, opts: S
     rawCount: collected.found.length,
     ...(backfilled > 0 ? { backfilled } : {}),
   }
+}
+
+/**
+ * 扫一个目标 —— 对外入口。
+ *
+ * 包一层的原因（2026-10-31）：`scanTargetCore` 有 **4 个 return 点**（3 条 failed + 1 条 ok），
+ * 逐点写 `lastScanState` 必然漏一个。这里用**单一落点**写结果态：无论从哪条分支返回，
+ * 状态都由同一次 `patchTarget` 落盘。
+ *
+ * 背景：`saveSnapshot` 与 `patchTarget({lastScanAt})` 在失败判定之前无条件执行 ⇒ **失败也推进
+ * `lastScanAt`**（对 429 源这比短退避更保守，但此前未声明）。本函数不改这个行为，只补一个
+ * 能区分「扫过」与「扫成功」的字段。
+ *
+ * 判据（尸体样本见 `tests/intel-scan-state.test.mjs`）：
+ * ① 429 失败 ⇒ `intel_watch(list)` 必须显示失败态（而不是只有时间）
+ * ② 成功一次 ⇒ 失败标记必须清掉（不能一失败就永久红）
+ * ③ 老记录无该字段 ⇒ 读作「未知」，不是 ok
+ */
+export async function scanTarget(target: IntelTarget, store: IntelStore, opts: ScanOpts = {}): Promise<ScanResult> {
+  const result = await scanTargetCore(target, store, opts)
+  const patch: Partial<IntelTarget> = { lastScanState: result.state }
+  if (result.state === 'failed') {
+    // 只留首条 + 截断 200：整串 sourceErrors 可能很长，写进 targets.json 会把台账撑爆
+    const detail = (result.error ?? '') || (result.sourceErrors ?? []).join(' | ') || '未知失败'
+    patch.lastScanError = detail.slice(0, 200)
+  } else {
+    // 成功必须清掉旧错误——否则「一失败就永久红」（判据②）
+    patch.lastScanError = undefined
+  }
+  store.patchTarget(target.id, patch)
+  return result
 }
 
 /** 扫全部目标（串行，礼貌；单个失败不影响其他） */

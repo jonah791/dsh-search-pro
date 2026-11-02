@@ -37,6 +37,18 @@ export interface IntelItem {
    */
   publishedAt?: string
   status: 'new' | 'seen' | 'starred' | 'dropped'
+  /**
+   * 已分诊、待读（与 status **正交**）—— 2026-11-03 新增。
+   *
+   * 为什么是独立布尔而不是 status 的第五个值：status 表达的是**我的裁决**
+   * （读完不特别留 / 读完要留 / 判为无价值），而「分诊过」表达的是**流程位置**，
+   * 两者可以同时成立（分诊过了但还没读）。
+   *
+   * 压进单值会逼我在两个谎言里二选一：伪称 seen（我读过）或伪称 dropped（它没价值）。
+   * 前者污染「读过」的读数，后者会真的把它从筛选池里删掉——一个合法动作
+   * （把一批论文分诊完，让它们离开「未读」视野）不该需要撒谎才能完成。
+   */
+  triaged?: boolean
   /** 来源标注（crawl / commoncrawl / crtsh / arxiv …） */
   source?: string
   /** 附加元数据（mime / status / 摘要 …） */
@@ -75,6 +87,17 @@ export interface IntelTarget {
   createdAt: string
   /** 上次扫描时间（ISO） */
   lastScanAt?: string
+  /**
+   * 上次扫描的**结果态**。字段缺失（老记录）= **未知**，不是 ok。
+   *
+   * 存在理由（2026-10-31）：此前 `intel_watch(list)` 只有 `lastScanAt`，而失败也推进它
+   * ⇒ 一个连续 429 的源在唯一的巡检视图里与健康源**逐字相同**（2026-10-17 实测 arxiv-deepweb：
+   * 双双 429、`state: failed`，但 list 显示 `上次 11:45`，与健康的 api-okx-listing 无任何区别）。
+   * 「有上次时间」与「上次成功」是两件事——缺字段时必须读成未知，不许读成健康。
+   */
+  lastScanState?: 'ok' | 'failed'
+  /** 上次失败原因（截断 200 字符，只留首条）。扫描成功时清掉，否则会「一失败就永久红」。 */
+  lastScanError?: string
   /** 累计发现条目数 */
   foundTotal?: number
   /**
@@ -249,7 +272,12 @@ export function isIntelWorthy(url: string, opts: WorthyOpts = {}): boolean {
   if (isStructuralPage(url)) return false
   if (opts.source === 'api') return true
   if (opts.isBaseline) {
-    return isHighValue(classifyItem(url))
+    // ⚠ `opts.source` 必须转交（2026-10-18 实测事故 · Bug A）：
+    // 丢了它 ⇒ classifyItem 落 URL 兜底返回 'page' ⇒ **arxiv 论文在基线扫描时被当页面丢弃**。
+    // 而它已进快照（快照存的是 collected.found 全部）⇒ diffNew 认为「见过」⇒ **永不再报**。
+    // 实证：arxiv-deepweb 的 SpiderSapien（2609.02532v1，SORTED 第 1 条）在快照不在库。
+    // 这类「参数传递断链」tsc 查不出（形参可选），只能靠尸体样本拦。
+    return isHighValue(classifyItem(url, undefined, opts.source))
   }
   return true
 }
@@ -341,19 +369,80 @@ export function pickBackfill(
   return out
 }
 
+/**
+ * 未读条目按「它该怎么被处置」分段（纯函数，无 IO —— 可单测）。
+ *
+ * 为什么按 source 而不是按 kind：kind 在真实数据里已同质
+ * （2026-11-03 01:04 现读：837 条 new 全是 paper、27 条全是 api），按 kind 分等于没分。
+ * source 才是「它怎么进来的」，而那决定它该怎么被处置：
+ * arxiv 是每日批量自动入库（**抽样即可，它不是债**），api 是定向端点（逐条判）。
+ */
+export function intelUnreadBreakdown(items: IntelItem[]) {
+  let arxiv = 0
+  let api = 0
+  let otherHigh = 0
+  let otherLow = 0
+  for (const i of items) {
+    if (i.source === 'arxiv') arxiv += 1
+    else if (i.source === 'api') api += 1
+    else if (isHighValue(i.kind)) otherHigh += 1
+    else otherLow += 1
+  }
+  return { arxiv, api, otherHigh, otherLow, total: items.length }
+}
+
+/**
+ * 把分段读数渲染成一行注入文案（纯函数）。
+ *
+ * 每段后面跟的是**动作**，不是形容词。旧版只说「N 条高价值未读」，
+ * 于是 864 这个数读起来像一笔还不清的债——而积压读数最坏的后果不是不准，
+ * 是让我因为债太大而**干脆不看它**。
+ */
+export function renderIntelUnreadLine(
+  b: ReturnType<typeof intelUnreadBreakdown>,
+  lastScan: string,
+): string {
+  const seg: string[] = []
+  if (b.api > 0) seg.push(`定向 ${b.api} 条待判（判据：与手上的事有没有交集）`)
+  if (b.otherHigh > 0) seg.push(`其他源 ${b.otherHigh} 条待判`)
+  if (b.otherLow > 0) seg.push(`${b.otherLow} 条页面噪音`)
+  if (b.arxiv > 0) seg.push(`arxiv ${b.arxiv} 条待筛（每日自动入库，抽样即可，**不是待读债**）`)
+  // 入口必须自带「它现在可见吗」（2026-11-03 · t-bd952b09）：
+  // 这行**每轮注入**，而 intel_* 挂在 toolface 的 evidence-retrieval 域里，
+  // domain 档默认只留常驻集 ⇒ 不写开域方式，这行就是在每轮推荐一个不可执行的动作。
+  // 旧形态更糟：lean 档下工具被 deny（根本不存在），模型会**误选成别的工具**并收到
+  // 一条无关的 schema 报错——实测 5 次撞在 interrupt_agent 上。
+  // domain 档下退化成响亮失败（unknown tool），但「提示指向不可执行」本身没变。
+  return `情报库：${seg.join(' · ')} · 上次扫描 ${lastScan}（intel_digest 看内容 / intel_scan 立刻扫｜intel_* 在 evidence-retrieval 域，domain 档需先 toolface 开域）`
+}
+
 /** 统计（进结论的读数必须现算） */
 export function intelStats(items: IntelItem[], targets: IntelTarget[]) {
   const byStatus: Record<string, number> = {}
   const byKind: Record<string, number> = {}
   const byTarget: Record<string, number> = {}
+  let read = 0
+  let triaged = 0
   for (const it of items) {
     byStatus[it.status] = (byStatus[it.status] ?? 0) + 1
     byKind[it.kind] = (byKind[it.kind] ?? 0) + 1
     byTarget[it.targetId] = (byTarget[it.targetId] ?? 0) + 1
+    // 「读过」不能只数 status==='seen'（2026-11-03 修）。
+    //
+    // starred（读完决定留着）和 dropped（读完判为无价值）**也是读过的**。
+    // 用 seen 当读过的唯一形式，会让「读过 ∧ 想留着」在读数里整个消失——
+    // 现读实测：seen 376 / starred 123 / dropped 515 ⇒ 123 条被排除，占读过总数 1/4。
+    // 下游 intel-verdict-check 报「读过但库里不是 seen」17 篇，正是这个口径的产物。
+    if (it.status !== 'new') read += 1
+    if (it.triaged) triaged += 1
   }
   return {
     targets: targets.length,
     total: items.length,
+    /** 读过（seen + starred + dropped）——与「未读」互补，不会把分诊未读算进来 */
+    read,
+    /** 已分诊待读（status 仍可能是 new） */
+    triaged,
     byStatus,
     byKind,
     byTarget,

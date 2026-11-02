@@ -116,6 +116,8 @@ export async function fetchDocument(input: string, opts: DocOpts = {}): Promise<
       const r = await execFileAsync('wsl.exe', ['-d', 'Ubuntu', '--', 'python3', ...args], {
         maxBuffer: 128 * 1024 * 1024,
         timeout: (opts.timeoutMs ?? 90000) + 60000,
+        // wsl.exe 也是控制台程序：不隐藏就每次抽取文档闪一个控制台窗口
+        windowsHide: true,
       })
       stdout = r.stdout
     } catch (e: any) {

@@ -74,10 +74,67 @@ export function encodeArxivQuery(q: string): string {
     .replace(/ /g, '+')
 }
 
+/**
+ * arxiv API 单次 `max_results` 的**协议上限**（不是业务量）。
+ *
+ * 它不表达「我想要多少篇」，只表达「协议最多给多少篇」——所以它是**真常量**
+ * （§5.40 的边界：协议/规格规定的字面量不算硬编码）。超上限时截断并**如实报出**
+ * （`onTruncated`），绝不静默缩水。
+ */
+const ARXIV_MAX_RESULTS_CAP = 2000
+
+/**
+ * arxiv **announce 周期 = 1 天**（协议机制，不是业务量）。
+ *
+ * 新论文提交后要等到下一个 announce（工作日约 UTC 20:00）才进入 API 索引 ⇒ 索引通常
+ * 滞后约 22 小时。2026-10-22 实测：现在 `10-21T16:09Z`，而按 submittedDate 降序取到的
+ * 最新论文是 `10-20T17:59Z`；同时 `submittedDate:[202610210000 TO 202610220000]`
+ * 的 totalResults = **0**。
+ *
+ * ⇒ **窗口下界必须回退一个周期**。否则「扫到此刻」的窗口会**跨过还没进索引的那批**：
+ * 今天扫到 0 条 → lastScanAt 仍推进到现在 → 那批论文明天傍晚才进索引，而窗口已经走过
+ * 它们 ⇒ **永久漏掉**。这是「条数当窗口」修好之后暴露的第二个漏，形状更隐蔽（读数报
+ * 「state=ok · 0 条」，看起来像「没有新论文」）。
+ *
+ * 回退会重复抓到已入库的条目——由 id 去重吸收，代价只是请求体大一点。
+ */
+const ARXIV_ANNOUNCE_LAG_MS = 24 * 60 * 60 * 1000
+
+/**
+ * arxiv Atom 响应里的 `opensearch:totalResults` = **该 query 在源侧的总条数**。
+ *
+ * 这是「窗口里一共有多少篇」的**权威真源**——有了它就不必拿 max_results 猜时间窗
+ * （§5.40：2026-10-21 实测 cs.AI 单日 215（10-20）/ 276（10-19），任何拍出来的条数
+ * 上界在量大的那天就是漏）。
+ *
+ * 取不到返回 **null 而不是 0**：0 表示「源说没有」，null 表示「没读到」——两件事（§5.9）。
+ */
+export function arxivTotalResults(xml: string): number | null {
+  const m = String(xml).match(/<opensearch:totalResults[^>]*>\s*(\d+)\s*<\/opensearch:totalResults>/i)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) ? n : null
+}
+
+/** 数响应里有几条 `<entry>`——用于判断「首轮拿到的够不够」 */
+function countArxivEntries(xml: string): number {
+  return String(xml).split(/<entry>/i).length - 1
+}
+
 export async function academicArxiv(
   query: string,
   limit = 8,
-  opts: { sortByDate?: boolean; fetcher?: (url: string) => Promise<string> } = {},
+  opts: {
+    sortByDate?: boolean
+    sinceMs?: number
+    fetcher?: (url: string) => Promise<string>
+    /** 窗口是真源时置 true：按源侧 totalResults 取全窗口，而不是拿 limit 当窗口大小 */
+    exactWindow?: boolean
+    /** 被协议上限截断时回调（total=源侧总数，cap=截断值） */
+    onTruncated?: (total: number, cap: number) => void
+    /** 监控式增量：窗口下界回退一个 announce 周期（补索引滞后，防「跨过未入索引的那批」永久漏） */
+    announceOverlap?: boolean
+  } = {},
 ): Promise<DeepResult[]> {
   // 四处 2026-10-17 实测修正：
   // ① **https 而非 http**——http 走一次重定向，慢且偶发失败（失败又被上层吞成空数组）
@@ -87,11 +144,41 @@ export async function academicArxiv(
   //    「该主题的经典论文」而不是「新论文」（实测 A/B：默认返回 2012/2016/2019 老论文；
   //    加参数后严格降序 2026→2025→2025→2024→2024，且首条仍是强相关）。
   //    监控场景要的是新论文 ⇒ 由**调用方显式要求**（一次性检索仍可用相关性）。
-  const q = encodeArxivQuery(arxivQuery(query))
+  // ⑤ **动态时间窗**（2026-10-21 主人两度纠正「以天为单位扫描，而不是数量」「非要硬编码吗」）：
+  //    窗口＝**上次扫描到现在**，由扫描历史本身决定 ⇒ 零配置、无需任何数字参数。
+  //    产出多时窗口不胀、产出少时不变窄、上次失败过则自动补漏（lastScanAt 不更新 ⇒ 窗口更大）。
+  //    ⚠ 条数上界（max_results）在任何静态值下都是**计数型代理量**：实测 cs.AI 取 200 条仍全落
+  //    同一天（≥200 篇/天）⇒ 「200 条」不等于「1 天」，某天 300 篇就会漏。
+  //    arxiv 的 submittedDate 格式为 YYYYMMDDHHMM（UTC），可含 AND 前缀条件。
+  let rawQuery = arxivQuery(query)
+  const sinceMs = opts.sinceMs
+  const hasWindow = typeof sinceMs === 'number' && Number.isFinite(sinceMs)
+  if (hasWindow) {
+    // 监控式增量必须回退一个 announce 周期：索引滞后约 22h，窗口若贴着「此刻」会跨过
+    // 还没进索引的那批（详见 ARXIV_ANNOUNCE_LAG_MS 注释）。
+    const from = opts.announceOverlap ? (sinceMs as number) - ARXIV_ANNOUNCE_LAG_MS : (sinceMs as number)
+    const stamp = (d: Date) => d.toISOString().replace(/[-:T]/g, '').slice(0, 12)
+    rawQuery = `(${rawQuery}) AND submittedDate:[${stamp(new Date(from))} TO ${stamp(new Date())}]`
+  }
+  const q = encodeArxivQuery(rawQuery)
   const sort = opts.sortByDate ? '&sortBy=submittedDate&sortOrder=descending' : ''
   const get = opts.fetcher ?? httpGet
-  const xml = await get(`https://export.arxiv.org/api/query?search_query=${q}${sort}&max_results=${limit}`)
-  return parseArxivEntries(xml, limit)
+  const queryUrl = (n: number) => `https://export.arxiv.org/api/query?search_query=${q}${sort}&max_results=${n}`
+  const first = Math.min(Math.max(1, Math.trunc(limit)), ARXIV_MAX_RESULTS_CAP)
+  const xml = await get(queryUrl(first))
+  // **窗口是真源时，条数由源侧决定，不由入参决定**（§5.40）。没有窗口（首次扫描 / 一次性
+  // 检索）时，源侧给不出「该抓多少」，入参条数此时是唯一可用的意图表达 ⇒ 沿用它。
+  if (!hasWindow || !opts.exactWindow) return parseArxivEntries(xml, first)
+  const total = arxivTotalResults(xml)
+  if (total === null) return parseArxivEntries(xml, first) // 读不到就不猜（0 与 null 分型）
+  const got = countArxivEntries(xml)
+  if (total > ARXIV_MAX_RESULTS_CAP) {
+    opts.onTruncated?.(total, ARXIV_MAX_RESULTS_CAP)
+    return parseArxivEntries(await get(queryUrl(ARXIV_MAX_RESULTS_CAP)), ARXIV_MAX_RESULTS_CAP)
+  }
+  if (total <= got) return parseArxivEntries(xml, got)
+  // 首轮没过窗口大小 ⇒ 按源侧总数再抓一次（精确，不拍数）
+  return parseArxivEntries(await get(queryUrl(total)), total)
 }
 
 /**
@@ -183,7 +270,16 @@ export async function searchAcademic(
   limit = 8,
   onError?: (source: AcademicSource, e: unknown) => void,
   // ⚠ 位置参数已到 5 个——下次动这里应合并成 options 对象（现在加第 5 个是为了**不破坏**既有调用方）。
-  opts: { arxivSortByDate?: boolean } = {},
+  opts: {
+    arxivSortByDate?: boolean
+    arxivSinceMs?: number
+    /** 窗口是真源 ⇒ 按源侧 totalResults 取全窗口（而不是拿 limit 当窗口大小） */
+    arxivExactWindow?: boolean
+    /** 被 arxiv 协议上限截断时回调（total=源侧总数，cap=截断值） */
+    arxivOnTruncated?: (total: number, cap: number) => void
+    /** 监控式增量：窗口下界回退一个 announce 周期（补 arxiv 索引滞后） */
+    arxivAnnounceOverlap?: boolean
+  } = {},
 ): Promise<DeepResult[]> {
   const srcs = source ? [source] : ACADEMIC_SOURCES
   const jobs = srcs.map((s) => {
@@ -192,7 +288,14 @@ export async function searchAcademic(
       return []
     }
     if (s === 'semantic') return academicSemanticScholar(query, limit).catch(fail)
-    if (s === 'arxiv') return academicArxiv(query, limit, { ...(opts.arxivSortByDate ? { sortByDate: true } : {}) }).catch(fail)
+    if (s === 'arxiv')
+      return academicArxiv(query, limit, {
+        ...(opts.arxivSortByDate ? { sortByDate: true } : {}),
+        ...(opts.arxivSinceMs !== undefined ? { sinceMs: opts.arxivSinceMs } : {}),
+        ...(opts.arxivExactWindow ? { exactWindow: true } : {}),
+        ...(opts.arxivOnTruncated ? { onTruncated: opts.arxivOnTruncated } : {}),
+        ...(opts.arxivAnnounceOverlap ? { announceOverlap: true } : {}),
+      }).catch(fail)
     if (s === 'crossref') return academicCrossref(query, limit).catch(fail)
     return academicOpenAlex(query, limit).catch(fail)
   })
