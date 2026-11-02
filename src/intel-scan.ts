@@ -193,7 +193,22 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
         headers: { 'user-agent': 'Mozilla/5.0 (compatible; alice-intel/1.0)', accept: 'application/json,*/*' },
         signal: AbortSignal.timeout(20_000),
       })
-      if (!res.ok) return { found: [], sourceErrors: [`api: HTTP ${res.status} ${res.statusText}`] }
+      if (!res.ok) {
+        // ⚠ 429 是**出口级**限流，不必然是目标不可用——措辞必须自带处置方向，否则读者只会看到
+        // 「目标坏了」。2026-11-03 实测（Upbit 公告源 / Cloudflare 1015）：
+        //   ① 同一 header 组合在**同一轮**实验里 429 与 200 混杂（② [429, 200]）；
+        //   ② 间隔 4s 的同通道序列 [429, 200, 429]；
+        //   ③ 所有请求都必须经共享出口节点才能出网（清空代理 env ⇒ 全部 fetch failed）。
+        // ⇒ 该出口 IP 上其他流量的速率会波及本请求。此前这份读数被解读成「TLS 指纹差异」，
+        //   导致该 target 被误判 16 天（期间它其实一直在正常产出 58 条）。
+        // 判据：定时扫描长期稳定成功、只有手动连发失败 ⇒ 撞窗口，不是目标坏。
+        const hint =
+          res.status === 429
+            ? '｜429 = 出口级限流（共享出口上他人流量会波及），不必然是目标不可用：先降触发频率或稍后重试；' +
+              '若定时扫描长期正常而仅手动连发失败 ⇒ 即撞窗口，不是目标坏了'
+            : ''
+        return { found: [], sourceErrors: [`api: HTTP ${res.status} ${res.statusText}${hint}`] }
+      }
       const json: unknown = await res.json()
       const mapped = mapApiItems(json, {
         url,
