@@ -221,6 +221,8 @@ cordis 组合(.dsh/profiles/web/cordis.patch.yml)
 | A44 | **site 类条目也有源侧时间（带来源标注）** | `npm test` → `tests/published-at.test.mjs` **11 例**（A120–A130，含 4 具尸体样本）；**线上取证**（真实跑 ccgp 15 页 / 深度 2：22 个 URL ⇒ **8 条有时间 = 36.4%**，来源分布 **`meta` 7 + `page` 1**、`time-tag` 0、孤儿键 0）。⚠ **验收必须同时报来源分布**——只看命中率会掩盖「全靠文件名猜」 | **已实测（2026-10-17）** |
 | A45 | **仅年份段不得当发布时间**（假精度 ⇒ 恰好压制新鲜情报） | **线上取证当场抓出**：初版对 `/2018/xxx.zip`、`/2026/guid.zip` 补 `01-01` ⇒ 三个附件命中**全是年份段形态**；而 `index.ts` 按 `publishedAt ?? foundAt` 排序 ⇒ `/2026/` 目录里**可能今天刚发**的文件被断言成「十个月前」而**降级**。修法：`extractDateFromUrl` **只认完整日期段**（年+月+日）。**修复后读数**：命中率 45.5% → **36.4%**（少掉的 3 条是假精度），`page` 继承来源 **0 → 1**（★ 假精度曾**短路**掉更好的代理路径：`timeForAttachment` 先试自身 URL、成功即不继承）。`npm test` → A128/A130 尸体样本（含**当年目录**） | **已实测（2026-10-17）** |
 
+| A46 | **扫描结果态可分辨**（「扫过」≠「扫成功」） | `npm test` → `tests/intel-scan-state.test.mjs` **6 例**（失败落盘 `failed` + 截断到 200 的 error / 成功清标记 / **老记录无字段 = 未知** / ok 不加噪音 / 超长 error 渲染截断 / failed 但无 error 文本仍标出）。**尸体注入验证有区分力**：把渲染层 `stateMark` 初值改回空串（旧行为：缺字段不显示）⇒ 判据③那条立刻红（**5 pass / 1 fail**）；从源码重建恢复 ⇒ **6/6 绿**。⚠ **线上读数待重启后取**——单元层已证，装配层未证 | **单元已实测（2026-10-31）** |
+
 **生效判据**：① `pnpm build`（`tsc -p tsconfig.json`）后 `lib/*.js` mtime 必须晚于对应 `src/*.ts`；② web 进程启动时间必须晚于 `lib/index.js` mtime（旧实例跑旧代码 = 未生效）；③ 行为判据：`search_quota` 能答且工具出现在工具面即装配成功。
 
 **回退**：① 源码级——`git -C self-plugins/dsh-search-pro revert <commit>`（<commit> 用 `git -C self-plugins/dsh-search-pro log --oneline -1` 取当前 HEAD）后重新 build + `preflight_check` + `daemon_restart`；② 配置级——`plugin_stop dsh-search-pro` / 从 cordis.patch.yml 移除 `agent-search-pro` 行 → 哨兵重启；③ 运行期——`search_cache action=clear` 清缓存（不涉及代码回退）。

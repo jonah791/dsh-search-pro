@@ -232,6 +232,42 @@ test('isIntelWorthy：协议文件与非 http 仍被拦（原有判据不退化�
   assert.equal(isIntelWorthy('not-a-url'), false)
 })
 
+// ── Bug A 尸体样本（2026-10-18 实测事故 · source 传递断链）────────────────
+//
+// 事故形状：基线分支写成 `isHighValue(classifyItem(url))` —— 丢了 `opts.source`
+// ⇒ classifyItem 落 URL 兜底返回 'page' ⇒ **arxiv 论文在基线扫描时被当页面丢弃**。
+// 而它已进快照（快照存 collected.found 全部）⇒ diffNew 认为「见过」⇒ **永不再报**。
+// 实证读数：arxiv-deepweb 与 arxiv-self-improving-agent 各有 **15 条被吃**
+// （15 = max_results ⇒ 基线那一整批全部失效），其中含最新一篇
+// SpiderSapien（2609.02532v1，SORTED 第 1 条）。
+//
+// 为什么 tsc 拦不住：`opts.source` 是**可选**形参，不传是合法类型。
+
+test('★★ 尸体样本：基线扫描时 arxiv 论文必须放行（Bug A：source 传递断链）', () => {
+  const paper = 'https://arxiv.org/abs/2609.02532v1'
+  assert.equal(
+    isIntelWorthy(paper, { isBaseline: true, source: 'arxiv' }),
+    true,
+    'arxiv 论文在基线期必须放行——基线只收高价值类，而论文正是高价值类',
+  )
+})
+
+test('★ 对照组：同一 arxiv URL 不给 source 时基线期被拦（证明 source 是判据而非恒真）', () => {
+  // 锁的是「判据有区分力」：若上一条恒真（判据被写宽成永远放行），这条会挂。
+  const paper = 'https://arxiv.org/abs/2609.02532v1'
+  assert.equal(
+    isIntelWorthy(paper, { isBaseline: true }),
+    false,
+    '不给 source ⇒ 识别不出论文 ⇒ 基线期按页面丢弃（Bug A 的形状，必须仍是 false）',
+  )
+})
+
+test('★ 防误修：site 源基线期普通页面仍被拦（修 Bug A 不得把基线判据整体写宽）', () => {
+  const page = 'https://www.ccgp.gov.cn/news/202609/t20260911_27309577.htm'
+  assert.equal(isIntelWorthy(page, { isBaseline: true, source: 'crawl' }), false)
+  assert.equal(isIntelWorthy(page, { isBaseline: false, source: 'crawl' }), true)
+})
+
 // ── api 源（声明式 JSON 端点 · 2026-10-17）──────────────────────────────
 //
 // 存在理由：大量高价值源是 JSON API（实测币安公告端点公开可用），而网页形态是 SPA。
