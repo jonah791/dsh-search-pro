@@ -469,6 +469,69 @@ export function renderIntelUnreadLine(
   return `情报库：${seg.join(' · ')} · 上次扫描 ${lastScan}（intel_digest 看内容 / intel_scan 立刻扫｜intel_* 在 evidence-retrieval 域，domain 档需先 toolface 开域）`
 }
 
+/** digest 的展示视图 */
+export interface DigestView {
+  ranked: IntelItem[]
+  groups: Map<string, IntelItem[]>
+  /** 本次列出的条数（受 perTarget 限制） */
+  shown: number
+  /** 列出条目里 kind ∈ {paper, api, attachment} 的条数——**类型判据，不是阅读价值** */
+  highShown: number
+  /** 被 perTarget 截掉的目标：[targetId, 全量条数] */
+  clipped: Array<[string, number]>
+  /** ranked 里来自 arxiv 源（每日自动入库）的条数 */
+  autoCount: number
+}
+
+/**
+ * digest 的展示视图（纯函数 · 2026-11-03 抽出）。
+ *
+ * 存在理由：这段逻辑原先内联在 `intel_digest.execute` 里，**测不到**——而它恰好是
+ * 「读数与它量的东西不对齐」的事故发生地：三处截断叠在一起（`listItems` 全局 limit →
+ * rank 排序 → 每目标 perTarget），谁是真正的上限说不清，于是「某源显示 0 条」被读成
+ * 「它没有新情报」。抽出来之后夹具能直接喂「一个源 900 条 + 另一个源 2 条」。
+ *
+ * ⚠ **调用方必须传全量**（`listItems({limit: 0})`）。rank 的排序必须发生在任何截断之前：
+ * 排在截断之后，被截掉的条目根本没机会参与「按价值排」——保护装错位置等于没有。
+ * 2026-11-03 实测：全局 `limit: 500` 时 arxiv 吃掉 462 个名额，`api-binance-delisting`
+ * （★ 提前 18 天公告、下架即暴跌的最强信源）显示 **0/2**，而 rank 就在它后面。
+ */
+export function buildDigestView(items: IntelItem[], targets: IntelTarget[], perTarget: number): DigestView {
+  // 价值优先（informativeness test 迁移 · 2026-10-16）：高价值类排在页面之前——
+  // 同一目标里「新附件」的信息量远高于「新页面」，不排序时页面会淹掉附件。
+  const rank = (k: string): number => (isHighValue(k) ? 0 : k === 'page' ? 2 : 3)
+  const ranked = items.slice().sort((a, b) => {
+    const d = rank(a.kind) - rank(b.kind)
+    if (d !== 0) return d
+    // 组内按**时效**排（publishedAt 优先，缺则退回 foundAt）。
+    // 2026-10-17 实测：api 源同一批扫描的条目 foundAt **完全相同**（都是 00:19）
+    // ⇒ 只按 foundAt 排等于没排，最新那条会被埋在 20 条里。
+    // 两者都是 ISO 串 ⇒ 字典序即时间序。
+    const ta = a.publishedAt ?? a.foundAt
+    const tb = b.publishedAt ?? b.foundAt
+    return String(tb).localeCompare(String(ta))
+  })
+  const groups = new Map<string, IntelItem[]>()
+  for (const it of ranked) {
+    const arr = groups.get(it.targetId) ?? []
+    if (arr.length < perTarget) arr.push(it)
+    groups.set(it.targetId, arr)
+  }
+  const shown = [...groups.values()].reduce((n, a) => n + a.length, 0)
+  const highShown = [...groups.values()].flat().filter((i) => isHighValue(i.kind)).length
+  // perTarget 才是**真正**的截断点（每目标列表长度上限），必须报出来——
+  // 否则「某源只有 2 条」会被读成「它只有 2 条新情报」。
+  const totals = new Map<string, number>()
+  for (const it of ranked) totals.set(it.targetId, (totals.get(it.targetId) ?? 0) + 1)
+  const clipped: Array<[string, number]> = [...totals].filter(([tid, n]) => n > (groups.get(tid)?.length ?? 0))
+  // 分域读数（2026-11-03）：arxiv 源是**每日自动入库的全量**（cs.AI 一天 200+ 条），
+  // 与手工登记的定向源（币安/OKX/Upbit/GitHub）不是同一种「待判」。
+  // 混成一个数会让「884 条债」掩盖真正该判的 47 条——两个域对不上账。
+  const autoIds = new Set(targets.filter((t) => t.kind === 'arxiv').map((t) => t.id))
+  const autoCount = ranked.filter((i) => autoIds.has(i.targetId)).length
+  return { ranked, groups, shown, highShown, clipped, autoCount }
+}
+
 /** 统计（进结论的读数必须现算） */
 export function intelStats(items: IntelItem[], targets: IntelTarget[]) {
   const byStatus: Record<string, number> = {}

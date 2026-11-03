@@ -25,7 +25,7 @@ import { isAttachment, extOf } from './discover.js'
 import { fetchDocument } from './document.js'
 import { IntelStore } from './intel-store.js'
 import { scanTarget, scanAll } from './intel-scan.js'
-import { summarizeScans, intelStats, intelUnreadBreakdown, renderIntelUnreadLine, isStructuralPage, isHighValue, kindTag, ageLabel, ageLabelWithSource, ageHours, dueTargetIds, type IntelTarget } from './intel.js'
+import { summarizeScans, intelStats, intelUnreadBreakdown, renderIntelUnreadLine, isStructuralPage, isHighValue, kindTag, ageLabel, ageLabelWithSource, ageHours, dueTargetIds, buildDigestView, type IntelTarget } from './intel.js'
 import { fileURLToPath } from 'node:url'
 import {
   buildStamp, channelsOf, composeSearchEntry, formatChannels, readPackageVersion, searchTrace,
@@ -1452,42 +1452,45 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
         const targets = s.listTargets()
         const hours = typeof args.sinceHours === 'number' && args.sinceHours > 0 ? args.sinceHours : 0
         const since = hours > 0 ? new Date(Date.now() - hours * 3600_000).toISOString() : undefined
-        const loaded = s.listItems({ status, limit: 500, ...(since ? { since } : {}) })
-        // 价值优先（informativeness test 迁移 · 2026-10-16）：高价值类排在页面之前——
-        // 同一目标里「新附件」的信息量远高于「新页面」，不排序时页面会淹掉附件。
-        // 判据走 isHighValue（单一真源）：新增高价值 kind 时只改一处。
-        const rank = (k: string): number => (isHighValue(k) ? 0 : k === 'page' ? 2 : 3)
-        const ranked = loaded.items.slice().sort((a, b) => {
-          const d = rank(a.kind) - rank(b.kind)
-          if (d !== 0) return d
-          // 组内按**时效**排（publishedAt 优先，缺则退回 foundAt）。
-          // 2026-10-17 实测：api 源同一批扫描的条目 foundAt **完全相同**（都是 00:19）
-          // ⇒ 只按 foundAt 排等于没排，最新那条会被埋在 20 条里。
-          // 两者都是 ISO 串 ⇒ 字典序即时间序。
-          const ta = a.publishedAt ?? a.foundAt
-          const tb = b.publishedAt ?? b.foundAt
-          return String(tb).localeCompare(String(ta))
-        })
-        const groups = new Map<string, any[]>()
-        for (const it of ranked) {
-          const arr = groups.get(it.targetId) ?? []
-          if (arr.length < perTarget) arr.push(it)
-          groups.set(it.targetId, arr)
-        }
-        const shown = [...groups.values()].reduce((n, a) => n + a.length, 0)
+        // 不设全局上限（limit: 0 = 全取，与 intel-scan 同一约定）。
+        //
+        // 存在理由（2026-11-03 实测）：原 `limit: 500` 是**按 foundAt 全局截断**，
+        // 而 arxiv-cs-ai 一天产 827 条 unread。取前 500 时 arxiv 吃掉 462 个名额，
+        // 剩 38 个分给 9 个定向源 ⇒ `api-binance-delisting`（标了 ★「提前 18 天公告、
+        // 下架即暴跌」的最强信源）显示 **0/2**，17 天来一条都没进过 digest。
+        //
+        // 危险形态：下面的 `rank()` 本意是「别让页面淹掉附件」，但它排在截断**之后**
+        // ⇒ 被截掉的条目根本没机会参与排序。**保护装错了位置，等于没有。**
+        const loaded = s.listItems({ status, limit: 0, ...(since ? { since } : {}) })
+        // 排序、分组、截断统计全部走纯函数（2026-11-03 抽出 · 可离线测）。
+        // 抽出的理由：三处截断叠在一起时「谁是真正的上限」说不清，而它正是
+        // 「某源显示 0 条」被读成「它没有新情报」的发生地——这种判断必须在可测层。
+        const { ranked, groups, shown, highShown, clipped, autoCount } = buildDigestView(loaded.items, targets, perTarget)
         const stats = intelStats(s.loadItems().items, targets)
-        const highShown = [...groups.values()].flat().filter((i) => isHighValue(i.kind)).length
         const lines: string[] = []
         lines.push(`# 情报汇总 · ${localStamp(new Date())}`)
         // 两个数必须分开说：`shown` 是**本次列出**的（受 perTarget 限制），
         // `loaded.filtered` 才是**未读合计**。混成一句会让「15」被读成「只有 15 条未读」
         // （2026-10-17 实测：未读 72 条时头部显示「new 15 条待看」，读数失真）
         lines.push(`条目 ${stats.total} 条 · 监控目标 ${stats.targets} 个`)
-        lines.push(`本次列出 ${shown} 条（高价值 ${highShown} 条）· ${status} 合计 ${loaded.filtered} 条`)
+        // ⚠「高价值」是**类型**判据（isHighValue = 论文/公告/附件 ≠ 页面），不是「值得读」。
+        // 把它写成「高价值 N 条」会让类型读数被读成阅读价值——2026-11-03 修正措辞。
+        lines.push(`本次列出 ${shown} 条（论文/公告/附件 ${highShown} 条 · 每目标上限 ${perTarget}）· ${status} 合计 ${loaded.filtered} 条`)
+        // 两个域对不上账的形状：884 = arxiv 837 + 定向 47，但前者「抽样即可」、后者「该判」。
+        // 不分开报，每次看到的都是「884 条债」，真正要处理的 47 条被淹没。
+        if (loaded.filtered > 0) {
+          lines.push(`域：定向 ${loaded.filtered - autoCount} 条（该判）· arxiv 自动入库 ${autoCount} 条（抽样即可，非待读债）`)
+        }
         // 读数带范围标注（§5.9 规则 6）：有时间窗时必须写出来——否则「合计 N 条」
         // 会被读成全量（与上面 `shown`/`filtered` 混读是同一种失真形状）
         if (since) lines.push(`时间窗：最近 ${hours} 小时（按**发现**时间 foundAt，非源侧发布时间）`)
-        if (loaded.filtered > 500) lines.push(`⚠ 待看 ${loaded.filtered} 条超过显示上限 500——只列了价值最高的 500 条（其余仍可用 intel_list 查）`)
+        // 原警告「只列了价值最高的 500 条」**承诺了代码没做的事**——那 500 条是按 foundAt
+        // 选的，`rank()` 排序在截断之后。现在全局不再截断，真正的截断点是 perTarget，
+        // 报它，并逐个点名被截的目标与缺口（「某源只有 2 条」≠「它只有 2 条新情报」）。
+        if (clipped.length) {
+          const detail = clipped.map(([tid, n]) => `${tid} ${groups.get(tid)?.length ?? 0}/${n}`).join(' · ')
+          lines.push(`⚠ 每目标上限 ${perTarget} 条截断：${detail}（调大 limit 看全，或 intel_list 按目标查）`)
+        }
         if (loaded.badLines > 0) lines.push(`⚠ items.jsonl 有 ${loaded.badLines} 行无法解析`)
         // 时效读数（2026-10-17）：推送判据是「有新增 + **有时效性**」，
         // 而此前条目只记 foundAt（我的扫描时刻）⇒ 这条判据**无从计算**，形同虚设。
