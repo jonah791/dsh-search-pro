@@ -99,6 +99,30 @@ interface Collected {
   rawCount?: number
 }
 
+/**
+ * 把 URL 里的 `{days:N}` 相对日期占位符折算成 **UTC** 日期（YYYY-MM-DD）。
+ *
+ * 存在理由（2026-11-03 · 台账 lh-6890ff86）：情报源的 URL 里写死绝对日期
+ * （如 GitHub search 的 `created:%3E2026-10-27`）会随窗口滑出而**静默变成死源**——
+ * 扫描仍报 `lastScanState=ok`，只是再也扫不到新条目（读数还在，量的却是过去）。
+ * 「每周手改一次」是记性；把折算写进扫描路径才是结构。
+ *
+ * 口径：
+ * - 输出 **UTC** 日期（GitHub / arXiv 的日期过滤都按 UTC 理解）；本地 +8 最坏偏 1 天，可接受。
+ * - **无占位符 ⇒ 原样返回**（现有全部源零行为变化）。
+ * - **非法写法原样保留**（`{days:abc}`、超 10 年）：让它在 URL 里可见地失败，
+ *   不静默折算成某个「差不多」的日期——静默兜底会把配置错误变成数据错误。
+ * - 只给 `api` 类用：`site`/`domain` 的 url 是被爬取的地址，`{days:7}` 在那里会被当成
+ *   路径段，语义不同 ⇒ 不加折算（无占位符时也不受影响，但语义边界要写明）。
+ */
+export function resolveRelativeDates(url: string, now: Date = new Date()): string {
+  return url.replace(/\{days:(\d+)\}/g, (raw: string, digits: string) => {
+    const days = Number(digits)
+    if (!Number.isSafeInteger(days) || days > 3650) return raw
+    return new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10)
+  })
+}
+
 /** 取数：把 target 变成一组候选 */
 async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> {
   if (target.kind === 'site') {
@@ -184,8 +208,11 @@ async function collect(target: IntelTarget, opts: ScanOpts): Promise<Collected> 
     return { found, sourceErrors: errs }
   }
   if (target.kind === 'api') {
-    const url = target.spec.url
-    if (!url) return { found: [], error: 'api 目标缺 spec.url' }
+    const rawUrl = target.spec.url
+    if (!rawUrl) return { found: [], error: 'api 目标缺 spec.url' }
+    // `{days:N}` 在**请求层**折算，**不写回 targets.json**（那里存的是模板，写回就成了一次性快照）。
+    // 折算后的串只进 fetch 与错误上下文；条目的 url 由 urlTemplate/idPath 生成，不受影响。
+    const url = resolveRelativeDates(rawUrl)
     const itemsPath = target.spec.itemsPath
     if (!itemsPath) return { found: [], error: 'api 目标缺 spec.itemsPath（声明式路径映射，如 data.catalogs.0.articles）' }
     try {
