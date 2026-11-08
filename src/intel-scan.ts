@@ -15,6 +15,7 @@ import { mapApiItems, publishedAtFromExtra } from './intel-api.js'
 import type { TimeSource } from './published-at.js'
 import { diffNew, fingerprint, isIntelWorthy, normalizeItem, pickBackfill, type IntelItem, type IntelTarget, type ScanOutcome } from './intel.js'
 import type { IntelStore } from './intel-store.js'
+import { findTemplateBatches, suppressIds } from './intel-poison.js'
 
 export interface ScanOpts {
   maxPages?: number
@@ -31,6 +32,14 @@ export interface ScanResult extends ScanOutcome {
   rawCount: number
   /** 本轮**补写**了 publishedAt 的存量条目数（「给已落盘条目加字段」的通用缺口，见 pickBackfill） */
   backfilled?: number
+  /**
+   * 本轮因「同模板批量」被拦下、**未入库**的条目数（2026-11-08）。
+   *
+   * 必须报出来的理由：压制是「这一条我没存」，而「源今天没产垃圾」与
+   * 「源还在产、只是全被我拦在门外」在读数上必须能分开——否则下次读的人
+   * 会以为源变干净了，而防护一旦失效也没人会发现。
+   */
+  poisonSuppressed?: number
 }
 
 /**
@@ -346,7 +355,37 @@ async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: Scan
     )
     .filter((it) => !persisted.has(it.id))
 
-  if (items.length > 0) store.appendItems(items)
+  // ★ 批量同模板检测（2026-11-08）：刷量仓在**入库前**拦一道。
+  //
+  // 为什么判据在本地而不在 URL 里：源查询（`stars:>50`）是公开的，刷量方读得到，
+  // 于是单条目静态阈值会被反向适配——实测两轮：第一批 fork 46-51 过了 `stars:>50`，
+  // 我加 `forks:<40` 后第二批把 fork 刷到 1-10 照样过。唯一站得住的是**关系型**判据：
+  // 同一仓库名在 24h 内跨 ≥5 个不同 owner。这个特征单条 API 返回里看不见，只能本地比。
+  //
+  // 纪律：压制**必须报数**（`poisonSuppressed`），不许静默丢——静默丢会让「源变干净了」
+  // 与「源还在灌、只是我看不见」长得一模一样。
+  let poisonSuppressed = 0
+  if (items.length > 0) {
+    const existingNew = store.listItems({ targetId: target.id, limit: 0, status: 'new' }).items
+    const batches = findTemplateBatches([...existingNew, ...items])
+    const suppressed = suppressIds(batches, items)
+    if (suppressed.size > 0) {
+      poisonSuppressed = suppressed.size
+      const kept = items.filter((it) => !suppressed.has(it.id))
+      // 整批全灭也要留痕：把批次摘要写进快照旁的目标字段，下轮 watch 能看到
+      store.patchTarget(target.id, {
+        lastPoisonBatches: batches.map((b) => ({
+          repo: b.repo,
+          owners: b.owners.length,
+          ids: b.ids.length,
+          spanHours: Math.round(b.spanHours * 10) / 10,
+        })),
+      } as Partial<IntelTarget>)
+      if (kept.length > 0) store.appendItems(kept)
+    } else {
+      store.appendItems(items)
+    }
+  }
 
   // 存量回填（2026-10-17）：已落盘但缺 publishedAt 的条目，本轮拿到时间就补写。
   // 必要性：diffNew 按指纹去重 ⇒ 已报过的条目**不会重报**，也就**永远不会**带上新字段
@@ -420,6 +459,7 @@ async function scanTargetCore(target: IntelTarget, store: IntelStore, opts: Scan
     items,
     rawCount: collected.rawCount ?? collected.found.length,
     ...(backfilled > 0 ? { backfilled } : {}),
+    ...(poisonSuppressed > 0 ? { poisonSuppressed } : {}),
   }
 }
 
