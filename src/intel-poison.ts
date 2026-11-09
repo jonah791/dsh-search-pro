@@ -49,9 +49,28 @@ export interface PoisonBatch {
 const DEFAULT_MIN_OWNERS = 5
 const DEFAULT_WINDOW_HOURS = 24
 
-/** 仓库名归一：`ai--manus` / `ai_manus` / `AI-Manus` 视为同一个 */
+/**
+ * 仓库名归一：**词序无关**——拆词 → 排序 → 拼接。
+ *
+ * 历史（2026-11-09 首次真实运行驱动）：原先只做「小写 + 连字符合并」，
+ * 能把 `ai--manus` / `ai_manus` / `AI-Manus` 归一，但抓不到 `manus-ai`（词序反转）。
+ * 当天真实漏网 2 条：`thecoderrrer/manus-ai` 与 `abhinay-h/manus-ai` 各自成组、
+ * 每组只有 2 个 owner < 阈值 5，而它们与 `ai-manus` 那 10 条是同一伙
+ * （同分钟创建 06:34/06:35、star 54 / fork 46 数字完全相同）。
+ * ⇒ `ai-manus` 与 `manus-ai` 必须归一到同一组。
+ *
+ * 代价（诚实标注）：理论上会把**词序重排的不同项目**判成同组
+ * （如 `agent-memory-dsh` vs `dsh-agent-memory`）。接受这个代价的理由——
+ * 两者出现在同一源、同一 24h 窗口、且各自都凑够 ≥5 个不同 owner 的概率极低；
+ * 且误判后果只是「多看一眼」，不是丢数据（压制只作用于本批新增，历史条目不动）。
+ */
 function normalizeRepo(repo: string): string {
-  return repo.toLowerCase().replace(/[-_]+/g, '-')
+  return repo
+    .toLowerCase()
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .sort()
+    .join('-')
 }
 
 /** `owner/repo` 优先取 title，退化到 url 尾部两段 */
