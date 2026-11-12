@@ -426,6 +426,7 @@ export function apply(ctx: Context, config: Config): void {  const logger = ctx.
   /* ── A · 查询准备组 ── */
   reg({
     name: 'search_build_query',
+    deferLoading: true,
     description: '查询改写：意图+关键词 → 多组查询变体（原词/短语/问题式/核心词），可选注入深挖语法（site:/filetype:/排除）。返回可直接用于各 search 工具的查询列表。',
     parameters: {
       intent: { type: 'string', required: true, description: '搜索意图描述' },
